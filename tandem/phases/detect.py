@@ -82,3 +82,29 @@ def detect_freefall(sig, exit_event):
     lo, hi = best
     return Segment(type="freefall", start_s=sig.t_s[lo], end_s=sig.t_s[hi],
                    source="telemetry", confidence=0.9)
+
+
+def detect_ground_climb(sig, exit_event):
+    if exit_event is None or not sig.speed_3d:
+        return []
+    exit_idx = min(range(len(sig.t_s)), key=lambda i: abs(sig.t_s[i] - exit_event.t_s))
+    if exit_idx <= 0:
+        return []
+    # First index where speed rises above the ground threshold = takeoff.
+    takeoff = None
+    for i in range(exit_idx):
+        if sig.speed_3d[i] > GROUND_SPEED_MS:
+            takeoff = i
+            break
+    segments = []
+    if takeoff is None:
+        # Never left the ground before exit (unusual) — whole span is ground.
+        segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[exit_idx],
+                                 "telemetry", 0.9))
+        return segments
+    if takeoff > 0:
+        segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[takeoff],
+                                 "telemetry", 0.95))
+    segments.append(Segment("climb", sig.t_s[takeoff], sig.t_s[exit_idx],
+                             "telemetry", 0.9))
+    return segments

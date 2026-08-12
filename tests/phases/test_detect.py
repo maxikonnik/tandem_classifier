@@ -1,5 +1,5 @@
 from tandem.phases.signals import Signals
-from tandem.phases.detect import detect_exit, detect_freefall, Segment, G
+from tandem.phases.detect import detect_exit, detect_freefall, detect_ground_climb, Segment, G
 
 
 def _in_aircraft_then_freefall(fs=10.0):
@@ -53,3 +53,31 @@ def test_detect_freefall_after_exit():
 def test_detect_freefall_none_without_exit():
     sig = _in_aircraft_then_freefall()
     assert detect_freefall(sig, None) is None
+
+
+def test_ground_then_climb_before_exit():
+    fs = 10.0
+    accel, speed = [], []
+    for _ in range(int(5 * fs)):       # ground: stationary
+        accel.append(1.0 * G); speed.append(0.5)
+    for _ in range(int(5 * fs)):       # climb: plane moving
+        accel.append(1.0 * G); speed.append(40.0)
+    for _ in range(int(2 * fs)):       # exit dropout
+        accel.append(0.05 * G); speed.append(50.0)
+    for _ in range(int(10 * fs)):      # freefall
+        accel.append(1.0 * G); speed.append(55.0)
+    t = [i / fs for i in range(len(accel))]
+    sig = Signals(t_s=t, accel_mag=accel, speed_3d=speed, fs=fs,
+                  has_accel=True, has_gps=True)
+    ev = detect_exit(sig)
+    segs = detect_ground_climb(sig, ev)
+    types = [s.type for s in segs]
+    assert types == ["ground_pre", "climb"]
+    assert segs[0].start_s == 0.0
+    assert segs[0].end_s <= 5.5          # ground ends ~5 s
+    assert segs[1].end_s <= ev.t_s + 0.2 # climb ends at exit
+
+
+def test_ground_climb_empty_without_exit():
+    sig = _in_aircraft_then_freefall()
+    assert detect_ground_climb(sig, None) == []
