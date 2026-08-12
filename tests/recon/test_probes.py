@@ -3,6 +3,7 @@ from tandem.recon.ffprobe import IntervalStats
 from tandem.recon.jumps import Jump, RecordingInfo
 from tandem.recon.probes import (
     probe_gps_utc, probe_keyframe_interval, probe_dual_camera, probe_visual,
+    probe_naming,
 )
 
 
@@ -40,3 +41,29 @@ def test_probe_visual_always_needs_review():
     r = probe_visual(3, "Ground background fraction", "/out/sheet.html")
     assert r.status == "needs_review"
     assert r.value["contact_sheet"] == "/out/sheet.html"
+
+
+def test_probe_naming_measured_when_no_unmatched():
+    r = probe_naming(["recording1", "recording2"], [])
+    assert r.assumption == 5
+    assert r.status == "measured"
+
+
+def test_probe_naming_needs_review_when_unmatched():
+    r = probe_naming(["recording1", "recording2"], ["unmatched1", "unmatched2"])
+    assert r.assumption == 5
+    assert r.status == "needs_review"
+
+
+def test_probe_keyframe_interval_blocked():
+    r = probe_keyframe_interval(IntervalStats(count=1, median_s=0.0, min_s=0.0, max_s=0.0))
+    assert r.assumption == 2
+    assert r.status == "blocked"
+
+
+def test_probe_dual_camera_no_instructor_cam():
+    j1 = Jump(recordings=[RecordingInfo(None, None, None, None, 1)])
+    j2 = Jump(recordings=[RecordingInfo(None, None, None, None, 1)])
+    r = probe_dual_camera([j1, j2])
+    assert r.assumption == 7
+    assert r.degradation == "NO_INSTRUCTOR_CAM"
