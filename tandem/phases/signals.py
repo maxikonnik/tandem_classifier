@@ -9,11 +9,10 @@ is a later refinement; seconds-scale phase boundaries do not need it.
 from __future__ import annotations
 
 import math
-import subprocess
 from dataclasses import dataclass, field
 
-from tandem.recon.ffprobe import find_gpmf_stream_index
 from tandem.recon.gpmf import decode_numbers, iter_klv, walk
+from tandem.recon.telemetry import extract_gpmf_blob
 
 
 @dataclass
@@ -107,20 +106,13 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
         return sig
     n_out = max(2, int(round(duration * fs)))
     sig.t_s = [i / fs for i in range(n_out)]
-    sig.accel_mag = resample(accel_raw, n_out) if accel_raw else []
-    sig.speed_3d = resample(speed_raw, n_out) if speed_raw else []
+    sig.accel_mag = resample(accel_raw, n_out) if accel_raw else [0.0] * n_out
+    sig.speed_3d = resample(speed_raw, n_out) if speed_raw else [0.0] * n_out
     return sig
 
 
 def build_signals_from_file(path: str, fs: float = 10.0) -> Signals | None:
-    index = find_gpmf_stream_index(path)
-    if index is None:
+    blob = extract_gpmf_blob(path)
+    if not blob:
         return None
-    out = subprocess.run(
-        ["ffmpeg", "-y", "-i", path, "-map", f"0:{index}",
-         "-codec", "copy", "-f", "data", "-"],
-        check=True, capture_output=True,
-    )
-    if not out.stdout:
-        return None
-    return build_signals(out.stdout, fs=fs)
+    return build_signals(blob, fs=fs)

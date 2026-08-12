@@ -53,3 +53,20 @@ def test_build_signals_without_streams_sets_flags_false():
     assert sig.has_accel is False
     assert sig.has_gps is False
     assert sig.accel_mag == [] and sig.speed_3d == []
+
+
+def test_build_signals_accel_only_pads_speed_with_zeros():
+    # STRM with SCAL+ACCL, but no GPS5: verifies array alignment invariant.
+    accl_scal = _klv(b"SCAL", b"s", 2, 1, struct.pack(">h", 100))
+    accl_payload = struct.pack(">3h", 300, 400, 0) + struct.pack(">3h", 600, 800, 0)
+    accl = _klv(b"ACCL", b"s", 6, 2, accl_payload)
+    strm_accl = _klv(b"STRM", b"\x00", 1, len(accl_scal + accl), accl_scal + accl)
+    devc = _klv(b"DEVC", b"\x00", 1, len(strm_accl), strm_accl)
+
+    sig = build_signals(devc, fs=10.0)
+    assert sig.has_accel is True
+    assert sig.has_gps is False
+    # All three arrays must have the same length (array alignment invariant)
+    assert len(sig.accel_mag) == len(sig.speed_3d) == len(sig.t_s)
+    # speed_3d must be zero-filled for the absent GPS stream
+    assert all(v == 0.0 for v in sig.speed_3d)
