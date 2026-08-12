@@ -635,7 +635,7 @@ Extracts the GPMF data stream with ffmpeg, parses it with Task 3's reader, and a
 **Interfaces:**
 - Consumes: `tandem.recon.gpmf.walk`, `decode_numbers`, `decode_utc`; `tandem.recon.ffprobe.find_gpmf_stream_index`.
 - Produces:
-  - `Telemetry` dataclass: `device_id: int | None`, `first_utc: datetime | None`, `has_gps: bool`, `has_utc: bool`, `altitude_m: list[float]`, `t_s: list[float]` (seconds from `first_utc`).
+  - `Telemetry` dataclass: `device_id: int | None`, `first_utc: datetime | None`, `has_gps: bool`, `has_utc: bool`, `speed_3d_ms: list[float]` (GPS5 3D speed in m/s, SCAL-corrected), `t_s: list[float]` (seconds from `first_utc`).
   - `parse_telemetry_blob(blob: bytes) -> Telemetry` — pure, parses a raw gpmd payload.
   - `extract_gpmf_blob(path: str) -> bytes` — ffmpeg extracts the data stream to memory.
   - `read_telemetry(path: str) -> Telemetry | None` — returns `None` when no GPMF stream is present (caller records `NO_TELEMETRY`).
@@ -657,15 +657,17 @@ def _klv(key, type_char, sample_size, repeat, payload):
     return header + payload + b"\x00" * pad
 
 
-def test_parse_blob_reads_device_utc_and_altitude():
+def test_parse_blob_reads_device_utc_and_scaled_speed():
     dvid = _klv(b"DVID", b"L", 4, 1, struct.pack(">I", 0x1001))
     gpsu = _klv(b"GPSU", b"U", 16, 1, b"260812091403.250")
-    # Two GPS5 samples: [lat, lon, alt, s2d, s3d] as int32, unscaled here
-    gps5_payload = struct.pack(">5i", 0, 0, 1000, 0, 55) + struct.pack(">5i", 0, 0, 990, 0, 55)
+    # SCAL: one divisor per GPS5 field (lat, lon, alt, speed_2d, speed_3d)
+    scal = _klv(b"SCAL", b"l", 4, 5, struct.pack(">5i", 10000000, 10000000, 1000, 1000, 1000))
+    # Two GPS5 samples [lat, lon, alt, s2d, s3d] int32; raw 3D speed 55000 -> 55.0 m/s
+    gps5_payload = struct.pack(">5i", 0, 0, 0, 0, 55000) + struct.pack(">5i", 0, 0, 0, 0, 54000)
     gps5 = _klv(b"GPS5", b"l", 20, 2, gps5_payload)
-    strm_utc = _klv(b"STRM", b"\x00", 1, len(gpsu), gpsu)
-    strm_gps = _klv(b"STRM", b"\x00", 1, len(gps5), gps5)
-    inner = dvid + strm_utc + strm_gps
+    inner_strm = gpsu + scal + gps5
+    strm = _klv(b"STRM", b"\x00", 1, len(inner_strm), inner_strm)
+    inner = dvid + strm
     devc = _klv(b"DEVC", b"\x00", 1, len(inner), inner)
 
     tel = parse_telemetry_blob(devc)
@@ -673,7 +675,7 @@ def test_parse_blob_reads_device_utc_and_altitude():
     assert tel.has_utc is True
     assert tel.has_gps is True
     assert tel.first_utc.hour == 9 and tel.first_utc.minute == 14
-    assert tel.altitude_m == [1000.0, 990.0]
+    assert tel.speed_3d_ms == [55.0, 54.0]
     assert tel.t_s[0] == 0.0
 
 
@@ -697,10 +699,11 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'tandem.recon.telemetry
 ```python
 """Extract and assemble GPMF telemetry into a UTC-scaled object.
 
-Altitude here is GPS altitude (GPS5 field index 2). It is noisy and is
-used only for rough windowing in reconnaissance, never as a production
-event source. The plan's later phases replace it with the physical
-phase detector.
+Descent rate comes from the GPS5 3D-speed field (already m/s after the
+SCAL divisor), never from GPS altitude — GPS altitude is too noisy to
+be worth differentiating. Even so this stays reconnaissance-grade: it
+only aims frame sampling. Production phase detection uses the
+accelerometer signatures of spec section 5.1.
 """
 from __future__ import annotations
 
@@ -709,7 +712,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from tandem.recon.ffprobe import find_gpmf_stream_index
-from tandem.recon.gpmf import decode_numbers, decode_utc, walk
+from tandem.recon.gpmf import decode_numbers, decode_utc, iter_klv, walk
 
 
 @dataclass
@@ -718,25 +721,47 @@ class Telemetry:
     first_utc: datetime | None = None
     has_gps: bool = False
     has_utc: bool = False
-    altitude_m: list[float] = field(default_factory=list)
+    speed_3d_ms: list[float] = field(default_factory=list)
     t_s: list[float] = field(default_factory=list)
+
+
+def _flatten(klv) -> list[float]:
+    return [v for sample in decode_numbers(klv) for v in sample]
 
 
 def parse_telemetry_blob(blob: bytes) -> Telemetry:
     tel = Telemetry()
+    # Device id lives directly under DEVC.
     for _path, item in walk(blob):
         if item.key == "DVID" and tel.device_id is None:
             tel.device_id = decode_numbers(item)[0][0]
-        elif item.key == "GPSU" and not tel.has_utc:
-            tel.first_utc = decode_utc(item.payload)
-            tel.has_utc = True
-        elif item.key == "GPS5":
+    # GPSU, SCAL and GPS5 are siblings inside the GPS STRM container.
+    for _path, strm in walk(blob):
+        if strm.key != "STRM":
+            continue
+        scal = None
+        gps5 = None
+        for c in iter_klv(strm.payload):
+            if c.key == "GPSU" and not tel.has_utc:
+                tel.first_utc = decode_utc(c.payload)
+                tel.has_utc = True
+            elif c.key == "SCAL":
+                scal = _flatten(c)
+            elif c.key == "GPS5":
+                gps5 = c
+        if gps5 is not None:
             tel.has_gps = True
-            for sample in decode_numbers(item):
-                tel.altitude_m.append(float(sample[2]))
-    # Uniform time base: GPMF GPS5 is ~18 Hz, but for windowing we only
-    # need a monotonic axis. Space samples evenly across the recording.
-    n = len(tel.altitude_m)
+            if scal and len(scal) >= 5 and scal[4]:
+                divisor = float(scal[4])
+            elif scal and len(scal) == 1 and scal[0]:
+                divisor = float(scal[0])
+            else:
+                divisor = 1.0
+            for sample in decode_numbers(gps5):
+                tel.speed_3d_ms.append(sample[4] / divisor)
+    # Uniform time base: GPS5 is ~18 Hz; for windowing we only need a
+    # monotonic axis, so space samples evenly.
+    n = len(tel.speed_3d_ms)
     if n:
         tel.t_s = [i * (1.0 / 18.0) for i in range(n)]
     return tel
@@ -919,7 +944,7 @@ git commit -m "feat(recon): jump grouping and dual-camera fraction"
 
 ## Task 7: Rough freefall and canopy window estimate
 
-Estimates a freefall window and a canopy-open instant from the telemetry altitude series, good enough to point the sampler (Task 8) at the right part of the video. Explicitly NOT the production phase detector — it exists only to aim frame sampling for the visual assumptions.
+Estimates a freefall window and a canopy-open instant from the telemetry GPS 3D-speed series, good enough to point the sampler (Task 8) at the right part of the video. Explicitly NOT the production phase detector — it exists only to aim frame sampling for the visual assumptions.
 
 **Files:**
 - Create: `tandem/recon/windows.py`
@@ -928,47 +953,45 @@ Estimates a freefall window and a canopy-open instant from the telemetry altitud
 **Interfaces:**
 - Consumes: `tandem.recon.telemetry.Telemetry`.
 - Produces:
-  - `vertical_speed(altitude_m: list[float], t_s: list[float]) -> list[float]` (pure) — smoothed descent rate (negative = falling), central difference.
-  - `estimate_windows(tel: Telemetry, freefall_ms: float = 40.0) -> Windows | None` where `Windows` has `freefall_start_s: float`, `freefall_end_s: float`, `canopy_open_s: float | None`. Returns `None` when altitude is absent.
+  - `smooth(xs: list[float], k: int = 5) -> list[float]` (pure) — moving-average smoother for the noisy speed series.
+  - `estimate_windows(tel: Telemetry, freefall_ms: float = 40.0) -> Windows | None` where `Windows` has `freefall_start_s: float`, `freefall_end_s: float`, `canopy_open_s: float | None`. Freefall is where smoothed GPS 3D speed is at or above `freefall_ms`; canopy-open is the first sample after freefall where it drops below. Returns `None` when speed is absent.
 
 - [ ] **Step 1: Write the failing test**
 
-Synthetic altitude: climb, then freefall (steep drop ~55 m/s), then canopy (gentle drop ~5 m/s).
+Synthetic speed series: freefall (~55 m/s), then under canopy (~6 m/s).
 
 `tests/recon/test_windows.py`:
 ```python
 from tandem.recon.telemetry import Telemetry
-from tandem.recon.windows import vertical_speed, estimate_windows
+from tandem.recon.windows import smooth, estimate_windows
 
 
-def _synthetic_altitude():
-    alt, t = [], []
+def _synthetic_speed():
+    speed, t = [], []
     time = 0.0
-    a = 4000.0
-    for _ in range(50):      # freefall: -55 m/s at 1 Hz
-        alt.append(a); t.append(time); a -= 55.0; time += 1.0
-    for _ in range(60):      # canopy: -5 m/s
-        alt.append(a); t.append(time); a -= 5.0; time += 1.0
-    return alt, t
+    for _ in range(50):      # freefall: ~55 m/s
+        speed.append(55.0); t.append(time); time += 1.0
+    for _ in range(60):      # under canopy: ~6 m/s
+        speed.append(6.0); t.append(time); time += 1.0
+    return speed, t
 
 
-def test_vertical_speed_sign_and_magnitude():
-    alt, t = _synthetic_altitude()
-    vs = vertical_speed(alt, t)
-    assert vs[10] < -40      # in freefall, fast descent
-    assert vs[80] > -15      # under canopy, slow descent
+def test_smooth_reduces_to_neighbourhood_mean():
+    assert smooth([10.0, 10.0, 10.0])[1] == 10.0
+    out = smooth([0.0, 0.0, 30.0, 0.0, 0.0], k=3)
+    assert out[2] == 10.0  # (0 + 30 + 0) / 3
 
 
 def test_estimate_windows_finds_freefall_and_canopy():
-    alt, t = _synthetic_altitude()
-    tel = Telemetry(has_gps=True, altitude_m=alt, t_s=t)
+    speed, t = _synthetic_speed()
+    tel = Telemetry(has_gps=True, speed_3d_ms=speed, t_s=t)
     w = estimate_windows(tel)
     assert w is not None
     assert w.freefall_start_s < w.freefall_end_s
-    assert 40.0 <= w.canopy_open_s <= 60.0
+    assert 45.0 <= w.canopy_open_s <= 55.0
 
 
-def test_estimate_windows_none_without_altitude():
+def test_estimate_windows_none_without_speed():
     assert estimate_windows(Telemetry()) is None
 ```
 
@@ -981,11 +1004,12 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'tandem.recon.windows'`
 
 `tandem/recon/windows.py`:
 ```python
-"""Rough freefall/canopy windowing from noisy GPS altitude.
+"""Rough freefall/canopy windowing from GPS 3D speed.
 
-Reconnaissance-only: aims the frame sampler, never emits events. The
-production detector (spec section 5.1) uses accelerometer signatures
-and a phase state machine instead.
+Reconnaissance-only: aims the frame sampler, never emits events. Uses
+the GPS5 3D-speed field directly — GPS altitude is unusably noisy, so
+we never differentiate it. The production detector (spec section 5.1)
+uses accelerometer signatures and a phase state machine instead.
 """
 from __future__ import annotations
 
@@ -1001,7 +1025,7 @@ class Windows:
     canopy_open_s: float | None
 
 
-def _moving_average(xs: list[float], k: int = 5) -> list[float]:
+def smooth(xs: list[float], k: int = 5) -> list[float]:
     if len(xs) < k:
         return list(xs)
     out = []
@@ -1014,30 +1038,18 @@ def _moving_average(xs: list[float], k: int = 5) -> list[float]:
     return out
 
 
-def vertical_speed(altitude_m: list[float], t_s: list[float]) -> list[float]:
-    alt = _moving_average(altitude_m)
-    n = len(alt)
-    vs = [0.0] * n
-    for i in range(n):
-        lo = max(0, i - 1)
-        hi = min(n - 1, i + 1)
-        dt = t_s[hi] - t_s[lo]
-        vs[i] = (alt[hi] - alt[lo]) / dt if dt else 0.0
-    return vs
-
-
 def estimate_windows(tel: Telemetry, freefall_ms: float = 40.0) -> Windows | None:
-    if not tel.altitude_m or not tel.t_s:
+    if not tel.speed_3d_ms or not tel.t_s:
         return None
-    vs = vertical_speed(tel.altitude_m, tel.t_s)
-    freefall_idx = [i for i, v in enumerate(vs) if v <= -freefall_ms]
+    speed = smooth(tel.speed_3d_ms)
+    freefall_idx = [i for i, v in enumerate(speed) if v >= freefall_ms]
     if not freefall_idx:
-        # No clear freefall signature; hand back the whole descent.
+        # No clear freefall signature; hand back the whole recording.
         return Windows(freefall_start_s=tel.t_s[0], freefall_end_s=tel.t_s[-1], canopy_open_s=None)
     start_i, end_i = freefall_idx[0], freefall_idx[-1]
     canopy_open_s = None
-    for i in range(end_i, len(vs)):
-        if vs[i] > -freefall_ms:
+    for i in range(end_i, len(speed)):
+        if speed[i] < freefall_ms:
             canopy_open_s = tel.t_s[i]
             break
     return Windows(
@@ -1481,7 +1493,7 @@ def test_run_writes_report(tmp_path, monkeypatch):
     from datetime import datetime, timezone
     tel = Telemetry(device_id=1, has_gps=True, has_utc=True,
                     first_utc=datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc),
-                    altitude_m=[4000.0, 3945.0], t_s=[0.0, 1.0])
+                    speed_3d_ms=[55.0, 6.0], t_s=[0.0, 1.0])
 
     monkeypatch.setattr(cli, "read_telemetry", lambda p: tel)
     monkeypatch.setattr(cli, "keyframe_pts", lambda p: [0.0, 0.5, 1.0])
@@ -1554,7 +1566,7 @@ def run(archive_dir: str, out_dir: str) -> str:
         if first_stats is None:
             first_stats = keyframe_interval_stats(keyframe_pts(primary))
         start = tel.first_utc if tel else None
-        end = (start + timedelta(seconds=len(tel.altitude_m) / 18.0)) if (tel and start) else None
+        end = (start + timedelta(seconds=len(tel.speed_3d_ms) / 18.0)) if (tel and start) else None
         infos.append(RecordingInfo(recording=rec, telemetry=tel, start_utc=start, end_utc=end))
 
     jump_list = group_jumps(infos)
@@ -1657,6 +1669,6 @@ Out of scope by design (become their own plans once findings land): the physical
 **Type consistency:** `Telemetry`, `Windows`, `IntervalStats`, `ProbeResult`, `RecordingInfo`, `Jump`, `SampleShot`, `KLV`, `GoProName`, and `Recording` keep the same fields and signatures wherever they are consumed. `read_telemetry`, `keyframe_pts`, `extract_frames`, and `build_contact_sheet` are imported into `cli` at module scope precisely so Task 11's test can monkeypatch them by name.
 
 **Known real-data risks the plan surfaces rather than hides:**
-- GPS altitude is noisy; `windows.py` is labeled reconnaissance-only and never emits events, so a rough window is acceptable — it only aims sampling.
+- Windowing uses the GPS5 3D-speed field, not GPS altitude (altitude is unusably noisy and is never differentiated); `windows.py` is reconnaissance-only and never emits events, so a rough window is acceptable — it only aims sampling.
 - GPMF device id as camera identity (Task 6) assumes each camera has a distinct `DVID`; the naming/dual-camera probes should be cross-checked against the contact sheet on the first real run before the extraction plan relies on them.
 - The `NO_INSTRUCTOR_CAM` fraction (assumption 7) directly sizes the auto-labeling budget for the visual canopy/landing detectors (spec section 6); if it comes back very low, the detector plans must budget for manual labeling.
