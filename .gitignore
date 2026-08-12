@@ -1,0 +1,45 @@
+# Исходное видео и извлечённые артефакты — в репозиторий не попадают никогда
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.lrv
+*.LRV
+*.thm
+*.THM
+frames/
+artifacts/
+*.parquet
+*.npy
+*.npz
+
+# Модели
+*.onnx
+*.pt
+*.pth
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Окружение и секреты
+.env
+.env.*
+!.env.example
+
+# Редакторы и ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Рабочие копии документов
+*.cd
