@@ -45,3 +45,40 @@ def detect_exit(sig):
             return Event(type="exit", t_s=sig.t_s[i], source="telemetry",
                          confidence=round(confidence, 3))
     return None
+
+
+@dataclass
+class Segment:
+    type: str
+    start_s: float
+    end_s: float
+    source: str
+    confidence: float
+
+
+def _is_freefall_sample(a: float, v: float) -> bool:
+    return (FREEFALL_MIN_MS <= v <= FREEFALL_MAX_MS
+            and ONEG_LOW_G * G <= a <= ONEG_HIGH_G * G)
+
+
+def detect_freefall(sig, exit_event):
+    if exit_event is None or not sig.speed_3d:
+        return None
+    # Find the exit index, then the longest freefall run at/after it.
+    start_idx = min(range(len(sig.t_s)), key=lambda i: abs(sig.t_s[i] - exit_event.t_s))
+    best = None
+    run_start = None
+    for i in range(start_idx, len(sig.t_s)):
+        if _is_freefall_sample(sig.accel_mag[i], sig.speed_3d[i]):
+            if run_start is None:
+                run_start = i
+            run_end = i
+            if best is None or (run_end - run_start) > (best[1] - best[0]):
+                best = (run_start, run_end)
+        else:
+            run_start = None
+    if best is None:
+        return None
+    lo, hi = best
+    return Segment(type="freefall", start_s=sig.t_s[lo], end_s=sig.t_s[hi],
+                   source="telemetry", confidence=0.9)

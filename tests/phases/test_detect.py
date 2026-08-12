@@ -1,5 +1,5 @@
 from tandem.phases.signals import Signals
-from tandem.phases.detect import detect_exit, G
+from tandem.phases.detect import detect_exit, detect_freefall, Segment, G
 
 
 def _in_aircraft_then_freefall(fs=10.0):
@@ -35,3 +35,21 @@ def test_detect_exit_none_when_no_dropout():
     sig = Signals(t_s=t, accel_mag=accel, speed_3d=speed, fs=fs,
                   has_accel=True, has_gps=True)
     assert detect_exit(sig) is None
+
+
+def test_detect_freefall_after_exit():
+    sig = _in_aircraft_then_freefall()
+    ev = detect_exit(sig)
+    seg = detect_freefall(sig, ev)
+    assert seg is not None
+    assert seg.type == "freefall"
+    assert seg.source == "telemetry"
+    assert seg.start_s >= ev.t_s - 0.5
+    assert seg.end_s > seg.start_s
+    # freefall spans roughly the last 20 s (12..32)
+    assert seg.end_s - seg.start_s >= 15.0
+
+
+def test_detect_freefall_none_without_exit():
+    sig = _in_aircraft_then_freefall()
+    assert detect_freefall(sig, None) is None
