@@ -43,7 +43,11 @@ def extract_frames(video: str, shots: list[SampleShot], out_dir: str) -> list[st
              "-vf", "scale=-2:720", dest],
             check=True, capture_output=True,
         )
-        paths.append(dest)
+        # A shot timestamp past end-of-recording can make ffmpeg exit 0
+        # without writing the JPEG; skip it rather than passing a
+        # nonexistent path downstream to build_contact_sheet.
+        if Path(dest).exists():
+            paths.append(dest)
     return paths
 
 

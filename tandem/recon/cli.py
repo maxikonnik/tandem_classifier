@@ -31,17 +31,20 @@ def run(archive_dir: str, out_dir: str) -> str:
 
     infos: list[RecordingInfo] = []
     first_tel = None
+    first_tel_info = None
     first_stats = None
     for rec in recordings:
         primary = rec.chapters[0]
         tel = read_telemetry(primary)
-        if first_tel is None:
-            first_tel = tel
         if first_stats is None:
             first_stats = keyframe_interval_stats(keyframe_pts(primary))
         start = tel.first_utc if tel else None
         end = (start + timedelta(seconds=len(tel.speed_3d_ms) / 18.0)) if (tel and start) else None
-        infos.append(RecordingInfo(recording=rec, telemetry=tel, start_utc=start, end_utc=end))
+        info = RecordingInfo(recording=rec, telemetry=tel, start_utc=start, end_utc=end)
+        infos.append(info)
+        if first_tel is None and tel is not None:
+            first_tel = tel
+            first_tel_info = info
 
     jump_list = group_jumps(infos)
 
@@ -54,12 +57,12 @@ def run(archive_dir: str, out_dir: str) -> str:
 
     # Visual assumptions: sample frames from the first telemetried recording.
     sheet = None
-    if first_tel and infos:
+    if first_tel and first_tel_info:
         windows = estimate_windows(first_tel)
         if windows:
             shots = sample_plan(windows)
             frame_dir = os.path.join(out_dir, "frames")
-            frames = extract_frames(infos[0].recording.chapters[0], shots, frame_dir)
+            frames = extract_frames(first_tel_info.recording.chapters[0], shots, frame_dir)
             sheet = os.path.join(out_dir, "contact_sheet.html")
             build_contact_sheet(frames, sheet, title="recon-sample")
     for a, title in [
