@@ -1,0 +1,25 @@
+[project]
+name = "tandem"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tandem*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires ffmpeg/ffprobe on PATH and sample media",
+]
