@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make phase detection work on the real archive — read the *whole* GPMF stream (not just its first second), detect exit/freefall/ground/climb from the accelerometer alone (GPS optional), trim the freefall window at the canopy opening shock, and reject the firmware-default GPS timestamp.
+**Goal:** Make phase detection work on the real archive — read the *whole* GPMF stream (not just its first second), detect exit (via a jerk gate) and freefall/ground/climb from the accelerometer alone (GPS optional), trim the freefall window at the operator's opening shock, and reject the firmware-default GPS timestamp.
 
 **Architecture:** Fixes and extends the existing `tandem/phases/` (signals, detect, api) and `tandem/recon/telemetry.py`. The redesign flips the dependency established in the first phase-detector plan: the accelerometer becomes the primary signal and GPS 3D speed becomes optional corroboration, because ~50% of the real archive has no GPS at all. All logic stays pure and unit-testable on synthetic multi-payload GPMF blobs; provisional thresholds are grounded in a real accelerometer trace (see Design notes) and remain named constants for later calibration.
 
@@ -23,8 +23,9 @@
 A real 202 s recording (Родионов `GX012475.MP4`, no GPS) yielded 201 ACCL payloads / 40353 samples at ~200 Hz. The current `build_signals` returned **5 samples (~1 s)** for the same file — it reads only the first DEVC payload. That is the first thing to fix; every downstream number depends on it.
 
 Observed `|a|` envelope (in g): steady phases sit at ~1.0 g with std ~0.01–0.05; movement/free-fall shows std ~0.10–0.15; **exit/free-fall onset dips to ~0.1 g** (near true 0 g); ground camera-handling bumps also hit ~2.3–2.9 g but last <1 s. **Validated on a real accel-only jump** (Дмитрий `GX010015`, no GPS used): the deepest smoothed (~1 s) `|a|` dip = **0.39 g at t=39.1 s** (raw min 0.13 g) is the exit, and the **largest post-exit spike = 5.89 g at t=91.8 s** is the canopy opening — a ~39–92 s free-fall that matched an independent vision review exactly. So:
-- **Exit** = the sustained near-0g dip in the **min-pooled envelope** (below ~0.35 g), lasting ≥1 s — unique to free-fall onset, needs no GPS. Raw `|a|` is too noisy to threshold directly (it briefly spikes above 0.5 g even mid-dip); threshold the min envelope, not the raw signal.
-- **Freefall** = from the exit dip to the **opening shock**, detected as the **largest `|a|` peak in the plausible free-fall window** (≈15–90 s after exit), NOT a first-crossing — real openings (~2–6 g, here 5.89 g) tower over free-fall buffeting and maneuvers (~2–3 g), so a low first-crossing threshold would truncate the window on an in-air turn.
+- **Exit** = detected by FUSING two cues (per the domain owner): (a) a rapid **jerk** — `|a|` in the min-pooled envelope drops from a steady ~1 g to below ~0.35 g *quickly* (the rate of the drop, not just the low level; a ground bump also reads low but does not come from a sustained ~1 g), and (b) a **frame-exposure jump** — the cabin is dark, outside is bright, so the keyframe brightens sharply at exit. This plan implements the telemetry jerk (came-from-~1g rapid drop); the exposure cue is a fusion input to add once keyframe luminance is available (recon already extracts keyframes, so per-frame brightness is cheap).
+- **Operator freefall window** = from exit to the operator's **accelerometer opening-shock** (largest `|a|` peak in ≈15–90 s after exit; real openings ~2–6 g, here 5.89 g, tower over buffeting ~2–3 g). This bounds the *operator's* freefall for aiming frame sampling — it is **NOT** the tandem canopy event.
+- **Tandem canopy opening is detected strictly VISUALLY** — a sharp growth of the object near the frame **centre** as the pair's canopy blooms — optionally corroborated by a head-jerk (the operator pitches up to keep the decelerating pair in frame). It is a **separate visual-detector plan**, because the operator is often a camera-flyer who opens their own canopy *later* than the tandem, so the operator's accel opening-shock is the operator's event, not the pair's.
 - **Downsampling erases the exit transient.** A 5 s mean stays ~1 g even when the 1 s minimum is 0.1 g. So the resampled grid must **preserve the minimum envelope** for dropout detection (min-pooling), not linear-average it away.
 
 ## File Structure
@@ -256,7 +257,7 @@ Redefine exit as a sustained near-0g accelerometer dip, requiring no GPS. GPS sp
 
 **Interfaces:**
 - Consumes: `Signals` (now with `accel_min`).
-- Produces: constants `EXIT_MIN_DURATION_S = 1.0`, `OPENING_SHOCK_G = 2.5`, `FREEFALL_MIN_S = 15.0`, `FREEFALL_MAX_S = 90.0`. `detect_exit(sig)` uses `accel_min` (min envelope) for the dropout, requires the dip to last at least `EXIT_MIN_DURATION_S`, and does **not** require GPS speed. Confidence is higher when GPS speed after the dip exceeds `FREEFALL_MIN_MS`.
+- Produces: constants `EXIT_MIN_DURATION_S = 1.0`, `PRE_EXIT_G = 0.8`, `JERK_LOOKBACK_S = 1.5`, `OPENING_SHOCK_G = 2.5`, `FREEFALL_MIN_S = 15.0`, `FREEFALL_MAX_S = 90.0`. `detect_exit(sig)` finds a min-envelope dip below `EXIT_DROPOUT_G` lasting ≥ `EXIT_MIN_DURATION_S` that dropped from a steady ~1 g — a **jerk gate**: the level `JERK_LOOKBACK_S` before the dip must have been ≥ `PRE_EXIT_G`. It does **not** require GPS. Confidence rises when GPS speed after the dip exceeds `FREEFALL_MIN_MS`. (The visual exposure-jump cue is fused in a later plan.)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -298,6 +299,19 @@ def test_brief_dip_is_not_an_exit():
     sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=[0.0] * len(amin),
                   fs=fs, has_accel=True, has_gps=False)
     assert detect_exit(sig) is None
+
+
+def test_gradual_low_g_without_prior_1g_is_not_exit():
+    # A recording already in a low-g state (never a steady ~1g before): the jerk
+    # gate must reject it — there was no rapid drop FROM 1g.
+    from tandem.phases.signals import Signals
+    fs = 10.0
+    amin = [0.2 * G] * int(20 * fs)
+    amag = [0.3 * G] * int(20 * fs)
+    t = [i / fs for i in range(len(amin))]
+    sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=[0.0] * len(amin),
+                  fs=fs, has_accel=True, has_gps=False)
+    assert detect_exit(sig) is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -310,9 +324,20 @@ Expected: FAIL — current `detect_exit` requires `speed_3d` to reach `FREEFALL_
 Replace `detect_exit` in `tandem/phases/detect.py`:
 ```python
 EXIT_MIN_DURATION_S = 1.0
+PRE_EXIT_G = 0.8          # the drop must come FROM a steady ~1g (jerk gate)
+JERK_LOOKBACK_S = 1.5     # measure the pre-drop level this far before the dip
 OPENING_SHOCK_G = 2.5      # a real canopy opening (~2-6g) towers over freefall buffeting (~2-3g)
 FREEFALL_MIN_S = 15.0
 FREEFALL_MAX_S = 90.0
+
+
+def _pre_drop_level(sig, i):
+    """Mean |a| over ~1 s ending JERK_LOOKBACK_S before index i (the in-aircraft level)."""
+    back = int(round(JERK_LOOKBACK_S * sig.fs))
+    lo = max(0, i - back)
+    hi = min(len(sig.accel_mag), lo + max(1, int(round(1.0 * sig.fs))))
+    seg = sig.accel_mag[lo:hi]
+    return sum(seg) / len(seg) if seg else 0.0
 
 
 def detect_exit(sig):
@@ -326,6 +351,11 @@ def detect_exit(sig):
             if run_start is None:
                 run_start = i
             if i - run_start + 1 >= min_samples:
+                # jerk gate: the dip must have dropped rapidly FROM ~1g, not be a
+                # gradual low-g stretch. (Duration already filters <1s ground bumps.)
+                if _pre_drop_level(sig, run_start) < PRE_EXIT_G * G:
+                    run_start = None
+                    continue
                 depth = 1.0 - (sig.accel_min[run_start] / G)
                 conf = max(0.0, min(1.0, depth))
                 if sig.has_gps and sig.speed_3d[run_start:] and \
@@ -352,9 +382,9 @@ git commit -m "feat(phases): accelerometer-first exit detection (GPS optional)"
 
 ---
 
-## Task 4: Opening-shock freefall window (trim the window)
+## Task 4: Operator freefall-window bound (accelerometer opening-shock)
 
-Freefall ends at the canopy opening shock — the first sustained `|a|` spike above `OPENING_SHOCK_G` after exit. This trims the over-long windows the recon run produced.
+The operator's freefall ends at their accelerometer opening-shock — the largest `|a|` peak in the plausible window after exit. This bounds the *operator's* freefall for aiming frame sampling and trims the over-long windows the recon run produced. **NOTE:** this is the operator's freefall bound, **not** the tandem canopy event — the tandem canopy is detected strictly visually in a separate plan (the operator, often a camera-flyer, opens their own canopy later than the pair).
 
 **Files:**
 - Modify: `tandem/phases/detect.py`
@@ -515,6 +545,8 @@ git commit -m "feat(recon): sample frames across the accelerometer freefall wind
 - GPS-less flights still produce phases (finding A) → Task 5 (`usable` guard), verified by an accel-only end-to-end test.
 
 **Out of scope (next plan — archive ingest):** broaden the filename parser + media glob for DJI/`.MOV`/7-digit GoPro names and never drop a file silently (rec 4); non-GPS jump grouping by file order/mtime (rec 2); cross-file jumps (freefall straddling recording boundaries, seen in the real trace). These are ingest concerns, separable from telemetry-signal work.
+
+**Out of scope (next plan — visual detectors / fusion):** per the domain owner, the tandem **canopy opening** is detected strictly **visually** — a sharp growth of the object near the frame **centre** — optionally corroborated by a head-jerk; and the **exit** detection fuses this plan's telemetry jerk with a **frame-exposure jump** (dark cabin → bright sky). Both need extracted-keyframe pixels, so they belong with the visual / feature-extraction work. This plan's accel opening-shock is only a sampling-window bound, never the emitted tandem canopy event.
 
 **Placeholder scan:** every code step carries real code; every test step a runnable command and expected result. Thresholds (`EXIT_DROPOUT_G`, `OPENING_SHOCK_G`, `EXIT_MIN_DURATION_S`, `FREEFALL_MIN_MS`) are named constants, grounded in the real trace (0.09 g dips, 2.3–2.9 g spikes), pending broader calibration.
 
