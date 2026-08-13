@@ -4,17 +4,17 @@ from tandem.phases.api import detect_phases, PhaseResult
 
 
 def _full_flight(fs=10.0):
-    accel, speed = [], []
+    accel, amin, speed = [], [], []
     for _ in range(int(5 * fs)):       # ground
-        accel.append(1.0 * G); speed.append(0.5)
+        accel.append(1.0 * G); amin.append(0.9 * G); speed.append(0.5)
     for _ in range(int(5 * fs)):       # climb
-        accel.append(1.0 * G); speed.append(40.0)
+        accel.append(1.0 * G); amin.append(0.9 * G); speed.append(40.0)
     for _ in range(int(2 * fs)):       # exit
-        accel.append(0.05 * G); speed.append(50.0)
+        accel.append(0.05 * G); amin.append(0.05 * G); speed.append(50.0)
     for _ in range(int(20 * fs)):      # freefall
-        accel.append(1.0 * G); speed.append(55.0)
+        accel.append(1.0 * G); amin.append(0.9 * G); speed.append(55.0)
     t = [i / fs for i in range(len(accel))]
-    return Signals(t_s=t, accel_mag=accel, speed_3d=speed, fs=fs,
+    return Signals(t_s=t, accel_mag=accel, accel_min=amin, speed_3d=speed, fs=fs,
                    has_accel=True, has_gps=True)
 
 
