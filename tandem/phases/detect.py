@@ -20,6 +20,7 @@ FREEFALL_MIN_MS = 45.0
 GROUND_SPEED_MS = 3.0
 STILL_WINDOW_S = 1.0      # window for the local-std stillness check (no-GPS ground split)
 GROUND_STD_G = 0.05       # local |a| std below this (in g) counts as "stationary"
+GROUND_LEVEL_TOL_G = 0.15 # local |a| mean must be within this of 1g to count as "stationary"
 
 
 @dataclass
@@ -95,31 +96,34 @@ def detect_freefall(sig, exit_event):
                    source="telemetry", confidence=0.85)
 
 
-def _local_std(values, lo, hi):
+def _local_mean_std(values, lo, hi):
     seg = values[lo:hi]
     n = len(seg)
     if n == 0:
-        return None
+        return None, None
     mean = sum(seg) / n
     var = sum((x - mean) ** 2 for x in seg) / n
-    return var ** 0.5
+    return mean, var ** 0.5
 
 
 def _stationary_prefix_end(sig, exit_idx):
-    """Longest leading run of windows with low local |a| std, in samples.
+    """Longest leading run of windows that are both low-std AND near 1g, in samples.
 
     Walks the pre-exit span window by window from t=0 and stops at the
-    first window whose std exceeds the stationary threshold. Returns None
-    if even the first window is not stationary (no confident prefix).
+    first window that isn't a steady ~1g reading — low local std alone
+    isn't enough, since a stuck/saturated sensor or a miscalibrated
+    offset can be just as flat while sitting nowhere near 1g. Returns
+    None if even the first window doesn't qualify (no confident prefix).
     """
     window = max(1, int(round(STILL_WINDOW_S * sig.fs)))
-    threshold = GROUND_STD_G * G
+    std_threshold = GROUND_STD_G * G
+    level_tol = GROUND_LEVEL_TOL_G * G
     end = 0
     i = 0
     while i < exit_idx:
         hi = min(i + window, exit_idx)
-        std = _local_std(sig.accel_mag, i, hi)
-        if std is None or std > threshold:
+        mean, std = _local_mean_std(sig.accel_mag, i, hi)
+        if std is None or std > std_threshold or abs(mean - G) > level_tol:
             break
         end = hi
         i = hi

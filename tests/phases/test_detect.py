@@ -156,6 +156,37 @@ def test_ground_climb_without_gps_no_stationary_prefix_is_all_climb():
     assert segs[0].end_s <= ev.t_s + 0.2
 
 
+def test_ground_climb_without_gps_flat_low_g_prefix_is_not_ground():
+    # A flat, low-variance prefix that sits nowhere near 1g (e.g. a stuck or
+    # saturated sensor, or a miscalibrated offset) must NOT be classified as
+    # ground_pre — stillness alone (low std) isn't enough; the level must
+    # also be near 1g. Followed by a genuinely steady climb so the exit
+    # jerk-gate still fires correctly at the real dropout.
+    fs = 10.0
+    amag, amin = [], []
+    for _ in range(int(3 * fs)):        # flat but at ~0.1g, not ~1g
+        amag.append(0.1 * G); amin.append(0.1 * G)
+    for i in range(int(5 * fs)):        # genuine noisy ~1g climb before exit
+        amag.append(G + (0.35 * G if i % 2 == 0 else -0.35 * G))
+        amin.append(0.6 * G)
+    for _ in range(int(2 * fs)):        # exit dropout
+        amag.append(0.3 * G); amin.append(0.1 * G)
+    for _ in range(int(15 * fs)):       # freefall
+        amag.append(1.0 * G); amin.append(0.8 * G)
+    t = [i / fs for i in range(len(amag))]
+    speed = [0.0] * len(amag)           # NO GPS
+    sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=speed,
+                  fs=fs, has_accel=True, has_gps=False)
+    ev = detect_exit(sig)
+    assert ev is not None
+    segs = detect_ground_climb(sig, ev)
+    types = [s.type for s in segs]
+    assert "ground_pre" not in types    # the low-g flat prefix must not be "ground"
+    assert types == ["climb"]
+    assert segs[0].start_s == 0.0
+    assert segs[0].end_s <= ev.t_s + 0.2
+
+
 def test_detect_exit_from_accel_alone_without_gps():
     sig = _accel_only_flight()
     ev = detect_exit(sig)
