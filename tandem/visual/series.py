@@ -24,7 +24,7 @@ def extract_keyframes(video: str, out_dir: str, fps_cap=None) -> list[str]:
     os.makedirs(out_dir, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-y", "-skip_frame", "nokey", "-i", video,
-         "-vsync", "0", "-vf", "scale=-2:720",
+         "-fps_mode", "passthrough", "-vf", "scale=-2:720",
          os.path.join(out_dir, "kf_%06d.jpg")],
         check=True, capture_output=True,
     )
