@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 G = 9.80665
-EXIT_DROPOUT_G = 0.35        # |a| below this (in g) marks free-fall onset
+EXIT_SMOOTH_S = 1.0          # smoothing window for the |a| envelope (real exit dips are noisy)
+EXIT_SMOOTH_G = 0.7          # smoothed |a| (in g) below this = free-fall-onset region
 EXIT_MIN_DURATION_S = 1.0
 PRE_EXIT_G = 0.8          # the drop must come FROM a steady ~1g (jerk gate)
 JERK_LOOKBACK_S = 1.5     # measure the pre-drop level this far before the dip
@@ -31,33 +32,41 @@ class Event:
     confidence: float
 
 
-def _pre_drop_level(sig, i):
-    """Mean |a| over ~1 s ending JERK_LOOKBACK_S before index i (the in-aircraft level)."""
-    back = int(round(JERK_LOOKBACK_S * sig.fs))
-    lo = max(0, i - back)
-    hi = min(len(sig.accel_mag), lo + max(1, int(round(1.0 * sig.fs))))
-    seg = sig.accel_mag[lo:hi]
-    return sum(seg) / len(seg) if seg else 0.0
+def _smooth(xs, k):
+    """Moving average over a window of k samples."""
+    if len(xs) < k or k < 2:
+        return list(xs)
+    half = k // 2
+    out = []
+    for i in range(len(xs)):
+        lo = max(0, i - half)
+        hi = min(len(xs), i + half + 1)
+        out.append(sum(xs[lo:hi]) / (hi - lo))
+    return out
 
 
 def detect_exit(sig):
-    if not sig.has_accel or not sig.accel_min:
+    # Real free-fall onset is a NOISY dip: |a| plunges toward 0 g but buffeting
+    # spikes it back above any raw threshold within fractions of a second, so a
+    # "continuous sub-threshold run" never forms (verified on real footage). So
+    # threshold the SMOOTHED |a| envelope instead. GPS optional; accel suffices.
+    if not sig.has_accel or not sig.accel_mag:
         return None
-    thresh = EXIT_DROPOUT_G * G
-    min_samples = max(1, int(round(EXIT_MIN_DURATION_S * sig.fs)))
+    fs = sig.fs
+    sm = _smooth([a / G for a in sig.accel_mag], max(2, int(round(EXIT_SMOOTH_S * fs))))
+    min_samples = max(1, int(round(EXIT_MIN_DURATION_S * fs)))
+    back = int(round(JERK_LOOKBACK_S * fs))
     run_start = None
-    for i, a in enumerate(sig.accel_min):
-        if a < thresh:
+    for i, v in enumerate(sm):
+        if v < EXIT_SMOOTH_G:
             if run_start is None:
                 run_start = i
             if i - run_start + 1 >= min_samples:
-                # jerk gate: the dip must have dropped rapidly FROM ~1g, not be a
-                # gradual low-g stretch. (Duration already filters <1s ground bumps.)
-                if _pre_drop_level(sig, run_start) < PRE_EXIT_G * G:
+                # jerk gate: the dip must have dropped FROM a steady ~1 g
+                if sm[max(0, run_start - back)] < PRE_EXIT_G:
                     run_start = None
                     continue
-                depth = 1.0 - (sig.accel_min[run_start] / G)
-                conf = max(0.0, min(1.0, depth))
+                conf = max(0.0, min(1.0, 1.0 - sm[run_start]))
                 if sig.has_gps and sig.speed_3d[run_start:] and \
                         max(sig.speed_3d[run_start:]) >= FREEFALL_MIN_MS:
                     conf = min(1.0, conf + 0.1)   # GPS corroboration

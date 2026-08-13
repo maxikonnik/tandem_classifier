@@ -24,7 +24,7 @@ def test_detect_exit_at_dropout():
     assert ev.type == "exit"
     assert ev.source == "telemetry"
     assert 9.5 <= ev.t_s <= 12.5     # within the dropout window (~10-12 s)
-    assert ev.confidence > 0.5
+    assert ev.confidence > 0.3       # smoothed-onset confidence (real dips are noisy)
 
 
 def test_detect_exit_none_when_no_dropout():
