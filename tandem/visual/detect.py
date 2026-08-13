@@ -40,9 +40,16 @@ def exit_by_background(series):
 
 CANOPY_RISE = 0.15
 CANOPY_RISE_WINDOW_S = 3.0
+CANOPY_MIN_AFTER_EXIT_S = 20.0   # the tandem canopy is never earlier than ~20s after exit;
+                                 # searching before that only catches cabin/freefall noise.
+                                 # Callers pass after_s = exit_t + CANOPY_MIN_AFTER_EXIT_S.
 
 
 def canopy_by_growth(series, after_s: float = 0.0):
+    # after_s should be exit_t + CANOPY_MIN_AFTER_EXIT_S (telemetry gives exit_t).
+    # Real-data validated: with after_s = exit+20s the tandem canopy is found at its
+    # true bloom (e.g. Дмитрий GX010015: exit 36.4s -> canopy 112.1s) and the cabin
+    # false positive (t~2s) is eliminated.
     for i in range(len(series)):
         if series[i].t_s < after_s:
             continue

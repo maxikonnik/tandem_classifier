@@ -29,3 +29,14 @@ This is a **design finding, not a constant tweak**: the exit and canopy detector
 - **Canopy:** restrict `canopy_by_growth` to the window after the (telemetry) exit/freefall phase, and require a large sustained central-fill rise (toward the observed ~0.5) with hysteresis, rejecting the noisy cabin segment.
 
 The unit-tested detector *code* (Tasks 1–4) is sound on synthetic series; it is the choice of image metrics and thresholds that must change to work on real footage. That choice is a detection-design decision for the domain owner.
+
+## Resolution (real-video validated)
+
+**Telemetry exit detector was broken on real data — fixed.** Real-video validation exposed that the merged `detect_exit` never fired on real jumps: the free-fall-onset |a| dip is noisy and oscillates above/below the raw 0.35 g threshold, so no continuous sub-threshold run of ≥1 s ever forms (longest ≈0.6 s). Fixed by thresholding the **smoothed** |a| envelope (1 s window, <0.7 g, jerk gate ≥0.8 g). Validated (in `main`, commit fccc5cd):
+- Дмитрий GX010015 → exit 36.4 s, freefall (36.4, 90.2 s).
+- 18 05 / GX010188 → exit 48.4 s, freefall (48.4, 111.6 s).
+- Родионов ground-footage file → exit None (correct, no false positive).
+
+**Canopy now works with the 20 s gate.** Per the domain owner, the tandem canopy is searched no earlier than exit + 20 s (`CANOPY_MIN_AFTER_EXIT_S`). With telemetry exit feeding the gate, the full pipeline validates on Дмитрий: **exit 36.4 s → canopy 112.1 s (confidence 1.0)** — the real bloom, cabin false positives eliminated.
+
+**Still open (lower priority now):** the *visual* exit cue (aircraft leaves frame) — `structure_frac` doesn't separate on real footage. It matters only for recordings without usable telemetry (rare, since the accelerometer is almost always present and telemetry exit is now reliable). Redesign candidates (mean-luma jump / foreground-occupancy) remain a domain-owner decision, deferred.
