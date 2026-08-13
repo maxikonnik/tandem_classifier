@@ -130,3 +130,13 @@ def test_gradual_low_g_without_prior_1g_is_not_exit():
     sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=[0.0] * len(amin),
                   fs=fs, has_accel=True, has_gps=False)
     assert detect_exit(sig) is None
+
+
+def test_freefall_ends_at_opening_shock():
+    sig = _accel_only_flight()          # exit ~10s, freefall 13-53s, shock 53-56s
+    ev = detect_exit(sig)
+    seg = detect_freefall(sig, ev)
+    assert seg is not None and seg.type == "freefall"
+    assert seg.start_s <= ev.t_s + 0.5
+    # freefall must END at the opening shock (~53s), not run to the recording end (~56s)
+    assert 51.0 <= seg.end_s <= 54.0

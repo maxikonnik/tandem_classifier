@@ -83,26 +83,22 @@ def _is_freefall_sample(a: float, v: float) -> bool:
 
 
 def detect_freefall(sig, exit_event):
-    if exit_event is None or not sig.speed_3d:
+    if exit_event is None or not sig.accel_mag:
         return None
-    # Find the exit index, then the longest freefall run at/after it.
     start_idx = min(range(len(sig.t_s)), key=lambda i: abs(sig.t_s[i] - exit_event.t_s))
-    best = None
-    run_start = None
-    for i in range(start_idx, len(sig.t_s)):
-        if _is_freefall_sample(sig.accel_mag[i], sig.speed_3d[i]):
-            if run_start is None:
-                run_start = i
-            run_end = i
-            if best is None or (run_end - run_start) > (best[1] - best[0]):
-                best = (run_start, run_end)
-        else:
-            run_start = None
-    if best is None:
+    lo = start_idx + int(round(FREEFALL_MIN_S * sig.fs))
+    hi = min(len(sig.accel_mag), start_idx + int(round(FREEFALL_MAX_S * sig.fs)))
+    end_idx = None
+    if lo < hi:
+        peak = max(range(lo, hi), key=lambda i: sig.accel_mag[i])
+        if sig.accel_mag[peak] >= OPENING_SHOCK_G * G:   # the opening towers over buffeting
+            end_idx = peak
+    if end_idx is None:                                   # no clear opening -> cap at max plausible freefall
+        end_idx = min(hi, len(sig.t_s) - 1)
+    if end_idx <= start_idx:
         return None
-    lo, hi = best
-    return Segment(type="freefall", start_s=sig.t_s[lo], end_s=sig.t_s[hi],
-                   source="telemetry", confidence=0.9)
+    return Segment(type="freefall", start_s=sig.t_s[start_idx], end_s=sig.t_s[end_idx],
+                   source="telemetry", confidence=0.85)
 
 
 def detect_ground_climb(sig, exit_event):
