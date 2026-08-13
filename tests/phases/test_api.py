@@ -33,6 +33,14 @@ def test_detect_phases_no_signal_is_no_telemetry():
     assert res.degradations == ["NO_TELEMETRY"]
 
 
+def test_full_flight_without_gps_still_detects_phases():
+    from tests.phases.test_detect import _accel_only_flight  # reuse fixture
+    res = detect_phases(_accel_only_flight())
+    assert "exit" in [e.type for e in res.events]
+    assert "freefall" in [p.type for p in res.phases]
+    assert "NO_TELEMETRY" not in res.degradations
+
+
 def test_detect_phases_flags_order_violation(monkeypatch):
     # Force the detectors to return physically-impossible, out-of-order
     # segments so the FSM branch in detect_phases is exercised directly.

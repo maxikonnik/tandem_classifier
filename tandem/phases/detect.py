@@ -18,6 +18,8 @@ FREEFALL_MIN_S = 15.0
 FREEFALL_MAX_S = 90.0
 FREEFALL_MIN_MS = 45.0
 GROUND_SPEED_MS = 3.0
+STILL_WINDOW_S = 1.0      # window for the local-std stillness check (no-GPS ground split)
+GROUND_STD_G = 0.05       # local |a| std below this (in g) counts as "stationary"
 
 
 @dataclass
@@ -93,27 +95,80 @@ def detect_freefall(sig, exit_event):
                    source="telemetry", confidence=0.85)
 
 
+def _local_std(values, lo, hi):
+    seg = values[lo:hi]
+    n = len(seg)
+    if n == 0:
+        return None
+    mean = sum(seg) / n
+    var = sum((x - mean) ** 2 for x in seg) / n
+    return var ** 0.5
+
+
+def _stationary_prefix_end(sig, exit_idx):
+    """Longest leading run of windows with low local |a| std, in samples.
+
+    Walks the pre-exit span window by window from t=0 and stops at the
+    first window whose std exceeds the stationary threshold. Returns None
+    if even the first window is not stationary (no confident prefix).
+    """
+    window = max(1, int(round(STILL_WINDOW_S * sig.fs)))
+    threshold = GROUND_STD_G * G
+    end = 0
+    i = 0
+    while i < exit_idx:
+        hi = min(i + window, exit_idx)
+        std = _local_std(sig.accel_mag, i, hi)
+        if std is None or std > threshold:
+            break
+        end = hi
+        i = hi
+    return end if end > 0 else None
+
+
 def detect_ground_climb(sig, exit_event):
-    if exit_event is None or not sig.speed_3d:
+    if exit_event is None:
         return []
     exit_idx = min(range(len(sig.t_s)), key=lambda i: abs(sig.t_s[i] - exit_event.t_s))
     if exit_idx <= 0:
         return []
-    # First index where speed rises above the ground threshold = takeoff.
-    takeoff = None
-    for i in range(exit_idx):
-        if sig.speed_3d[i] > GROUND_SPEED_MS:
-            takeoff = i
-            break
-    segments = []
-    if takeoff is None:
-        # Never left the ground before exit (unusual) — whole span is ground.
-        segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[exit_idx],
+
+    if sig.has_gps:
+        if not sig.speed_3d:
+            return []
+        # First index where speed rises above the ground threshold = takeoff.
+        takeoff = None
+        for i in range(exit_idx):
+            if sig.speed_3d[i] > GROUND_SPEED_MS:
+                takeoff = i
+                break
+        segments = []
+        if takeoff is None:
+            # Never left the ground before exit (unusual) — whole span is ground.
+            segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[exit_idx],
+                                     "telemetry", 0.9))
+            return segments
+        if takeoff > 0:
+            segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[takeoff],
+                                     "telemetry", 0.95))
+        segments.append(Segment("climb", sig.t_s[takeoff], sig.t_s[exit_idx],
                                  "telemetry", 0.9))
         return segments
-    if takeoff > 0:
-        segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[takeoff],
-                                 "telemetry", 0.95))
-    segments.append(Segment("climb", sig.t_s[takeoff], sig.t_s[exit_idx],
-                             "telemetry", 0.9))
+
+    # No GPS: GPS speed is unavailable, so split by accelerometer stillness
+    # instead. A confidently-detected leading low-variance prefix (parked,
+    # engine off) becomes ground_pre; everything after it up to exit is
+    # climb (aircraft). Without a confident prefix, emit just climb.
+    if not sig.accel_mag:
+        return []
+    ground_end = _stationary_prefix_end(sig, exit_idx)
+    segments = []
+    climb_start = 0
+    if ground_end:
+        segments.append(Segment("ground_pre", sig.t_s[0], sig.t_s[ground_end],
+                                 "telemetry", 0.85))
+        climb_start = ground_end
+    if climb_start < exit_idx:
+        segments.append(Segment("climb", sig.t_s[climb_start], sig.t_s[exit_idx],
+                                 "telemetry", 0.8))
     return segments

@@ -100,6 +100,62 @@ def _accel_only_flight(fs=10.0):
                    fs=fs, has_accel=True, has_gps=False)
 
 
+def test_ground_climb_without_gps_uses_accel_stillness():
+    # No GPS: split the pre-exit span by accelerometer stillness instead of
+    # speed. A steady, low-variance prefix (parked, engine off) becomes
+    # ground_pre; the noisier taxi/climb vibration after it is climb.
+    fs = 10.0
+    amag, amin = [], []
+    for i in range(int(5 * fs)):        # ground: rock-steady ~1g (tiny ripple)
+        amag.append(G + (0.005 * G if i % 2 == 0 else -0.005 * G))
+        amin.append(0.95 * G)
+    for i in range(int(5 * fs)):        # climb: noisy engine/airframe vibration
+        amag.append(G + (0.35 * G if i % 2 == 0 else -0.35 * G))
+        amin.append(0.6 * G)
+    for _ in range(int(2 * fs)):        # exit dropout
+        amag.append(0.3 * G); amin.append(0.1 * G)
+    for _ in range(int(15 * fs)):       # freefall
+        amag.append(1.0 * G); amin.append(0.8 * G)
+    t = [i / fs for i in range(len(amag))]
+    speed = [0.0] * len(amag)           # NO GPS
+    sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=speed,
+                  fs=fs, has_accel=True, has_gps=False)
+    ev = detect_exit(sig)
+    assert ev is not None
+    segs = detect_ground_climb(sig, ev)
+    types = [s.type for s in segs]
+    assert types == ["ground_pre", "climb"]
+    assert segs[0].start_s == 0.0
+    assert segs[0].end_s <= 5.5           # ground ends ~5 s
+    assert segs[1].end_s <= ev.t_s + 0.2  # climb ends at exit
+    assert all(s.source == "telemetry" for s in segs)
+
+
+def test_ground_climb_without_gps_no_stationary_prefix_is_all_climb():
+    # No GPS and no detectable stationary prefix (noisy the whole way):
+    # the whole pre-exit span is emitted as a single climb segment.
+    fs = 10.0
+    amag, amin = [], []
+    for i in range(int(8 * fs)):        # noisy the whole way, never settles
+        amag.append(G + (0.35 * G if i % 2 == 0 else -0.35 * G))
+        amin.append(0.6 * G)
+    for _ in range(int(2 * fs)):        # exit dropout
+        amag.append(0.3 * G); amin.append(0.1 * G)
+    for _ in range(int(15 * fs)):       # freefall
+        amag.append(1.0 * G); amin.append(0.8 * G)
+    t = [i / fs for i in range(len(amag))]
+    speed = [0.0] * len(amag)           # NO GPS
+    sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=speed,
+                  fs=fs, has_accel=True, has_gps=False)
+    ev = detect_exit(sig)
+    assert ev is not None
+    segs = detect_ground_climb(sig, ev)
+    types = [s.type for s in segs]
+    assert types == ["climb"]
+    assert segs[0].start_s == 0.0
+    assert segs[0].end_s <= ev.t_s + 0.2
+
+
 def test_detect_exit_from_accel_alone_without_gps():
     sig = _accel_only_flight()
     ev = detect_exit(sig)

@@ -22,7 +22,7 @@ class PhaseResult:
 
 
 def detect_phases(sig) -> PhaseResult:
-    usable = (sig.has_accel or sig.has_gps) and (sig.accel_mag or sig.speed_3d)
+    usable = (sig.has_accel and bool(sig.accel_mag)) or (sig.has_gps and bool(sig.speed_3d))
     if not usable:
         return PhaseResult(degradations=["NO_TELEMETRY"])
 
