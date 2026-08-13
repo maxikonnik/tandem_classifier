@@ -11,10 +11,12 @@ from tandem.recon.naming import group_recordings
 from tandem.recon.telemetry import read_telemetry
 from tandem.recon.ffprobe import keyframe_pts, keyframe_interval_stats
 from tandem.recon.jumps import RecordingInfo, group_jumps
-from tandem.recon.windows import estimate_windows
+from tandem.recon.windows import Windows, estimate_windows
 from tandem.recon.sampler import sample_plan, extract_frames, build_contact_sheet
 from tandem.recon import probes as P
 from tandem.recon.report import render_report
+from tandem.phases.signals import build_signals_from_file
+from tandem.phases.api import detect_phases
 
 
 def _list_media(archive_dir: str) -> list[str]:
@@ -22,6 +24,24 @@ def _list_media(archive_dir: str) -> list[str]:
     for ext in ("MP4", "mp4"):
         files.extend(glob.glob(os.path.join(archive_dir, f"*.{ext}")))
     return sorted(set(files))
+
+
+def _accel_freefall_window(primary_path: str) -> Windows | None:
+    """Trimmed freefall window from the accelerometer phase detector.
+
+    Returns None when there is no accelerometer telemetry or the
+    detector found no freefall segment, so the caller can fall back to
+    the crude GPS-speed estimate (`estimate_windows`).
+    """
+    sig = build_signals_from_file(primary_path)
+    if sig is None or not sig.has_accel:
+        return None
+    result = detect_phases(sig)
+    freefall = next((p for p in result.phases if p.type == "freefall"), None)
+    if freefall is None:
+        return None
+    return Windows(freefall_start_s=freefall.start_s, freefall_end_s=freefall.end_s,
+                    canopy_open_s=None)
 
 
 def run(archive_dir: str, out_dir: str) -> str:
@@ -58,11 +78,14 @@ def run(archive_dir: str, out_dir: str) -> str:
     # Visual assumptions: sample frames from the first telemetried recording.
     sheet = None
     if first_tel and first_tel_info:
-        windows = estimate_windows(first_tel)
+        primary_path = first_tel_info.recording.chapters[0]
+        windows = _accel_freefall_window(primary_path)
+        if windows is None:
+            windows = estimate_windows(first_tel)
         if windows:
             shots = sample_plan(windows)
             frame_dir = os.path.join(out_dir, "frames")
-            frames = extract_frames(first_tel_info.recording.chapters[0], shots, frame_dir)
+            frames = extract_frames(primary_path, shots, frame_dir)
             sheet = os.path.join(out_dir, "contact_sheet.html")
             build_contact_sheet(frames, sheet, title="recon-sample")
     for a, title in [
