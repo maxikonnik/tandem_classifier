@@ -14,6 +14,7 @@
 - **Consume 720p keyframes** at the ~1 s cadence the real archive confirmed (assumption 2: `keyframe_med_s ≈ 1.001`). Temporal resolution of every visual cue is therefore ~1 s.
 - **Every emitted cue carries `source="visual"`.** Times are recording-relative seconds.
 - **Operator ≠ tandem.** The canopy cue is the *tandem pair's* canopy seen in the operator's frame (object growing at centre) — never the operator's own accel opening-shock.
+- **Scope: external operator camera only.** These cues (aircraft-leaving-frame exit, object-growth canopy) are tuned to the external camera, whose interview/freefall/landing are *separate recordings*. The instructor's hand-cam records the whole jump as one continuous file and needs within-file segmentation — a **separate plan**, not covered here.
 - **Exit visual cue = background change, not brightness.** Per the domain owner: before exit the aircraft fills most of the frame; at exit it rapidly leaves. This is detected from frame **structure/edge density**, which works even when the operator has already climbed outside the plane (where an exposure/brightness jump fails). Brightness is kept only as a secondary corroborator.
 - **Thresholds are provisional** and must be calibrated on real keyframes (Task 5) — keep them named constants.
 
