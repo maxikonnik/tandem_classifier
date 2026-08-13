@@ -19,6 +19,7 @@ from tandem.recon.telemetry import extract_gpmf_blob
 class Signals:
     t_s: list[float] = field(default_factory=list)
     accel_mag: list[float] = field(default_factory=list)
+    accel_min: list[float] = field(default_factory=list)
     speed_3d: list[float] = field(default_factory=list)
     fs: float = 10.0
     has_accel: bool = False
@@ -44,6 +45,18 @@ def resample(values: list[float], n_out: int) -> list[float]:
         hi = min(lo + 1, n_in - 1)
         frac = pos - lo
         out.append(values[lo] * (1.0 - frac) + values[hi] * frac)
+    return out
+
+
+def pool_min(values: list[float], n_out: int) -> list[float]:
+    if not values or n_out <= 0:
+        return []
+    n_in = len(values)
+    out = []
+    for j in range(n_out):
+        lo = (j * n_in) // n_out
+        hi = max(lo + 1, ((j + 1) * n_in) // n_out)
+        out.append(min(values[lo:hi]))
     return out
 
 
@@ -90,14 +103,20 @@ def _gps_speeds(children) -> list[float] | None:
 
 
 def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
-    accel_raw = None
-    speed_raw = None
+    accel_raw: list[float] = []
+    speed_raw: list[float] = []
+    saw_accel = False
+    saw_gps = False
     for children in _stream_children(blob):
-        if accel_raw is None:
-            accel_raw = _accel_magnitudes(children)
-        if speed_raw is None:
-            speed_raw = _gps_speeds(children)
-    sig = Signals(fs=fs, has_accel=accel_raw is not None, has_gps=speed_raw is not None)
+        a = _accel_magnitudes(children)
+        if a is not None:
+            saw_accel = True
+            accel_raw.extend(a)
+        s = _gps_speeds(children)
+        if s is not None:
+            saw_gps = True
+            speed_raw.extend(s)
+    sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps)
     # Recording duration: longer of the two streams at their nominal rates.
     accel_dur = (len(accel_raw) / 200.0) if accel_raw else 0.0
     gps_dur = (len(speed_raw) / 18.0) if speed_raw else 0.0
@@ -107,6 +126,7 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     n_out = max(2, int(round(duration * fs)))
     sig.t_s = [i / fs for i in range(n_out)]
     sig.accel_mag = resample(accel_raw, n_out) if accel_raw else [0.0] * n_out
+    sig.accel_min = pool_min(accel_raw, n_out) if accel_raw else [0.0] * n_out
     sig.speed_3d = resample(speed_raw, n_out) if speed_raw else [0.0] * n_out
     return sig
 

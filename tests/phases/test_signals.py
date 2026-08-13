@@ -1,6 +1,6 @@
 import struct
 
-from tandem.phases.signals import Signals, resample, build_signals
+from tandem.phases.signals import Signals, resample, build_signals, pool_min
 
 
 def _klv(key, type_char, sample_size, repeat, payload):
@@ -70,3 +70,30 @@ def test_build_signals_accel_only_pads_speed_with_zeros():
     assert len(sig.accel_mag) == len(sig.speed_3d) == len(sig.t_s)
     # speed_3d must be zero-filled for the absent GPS stream
     assert all(v == 0.0 for v in sig.speed_3d)
+
+
+def test_build_signals_accumulates_across_payloads():
+    # Two DEVC payloads, each a STRM with SCAL+ACCL. Payload 1 has a deep dip.
+    def strm_accl(vals):  # vals: list of (x,y,z) int16 tuples
+        scal = _klv(b"SCAL", b"s", 2, 1, struct.pack(">h", 100))
+        payload = b"".join(struct.pack(">3h", *v) for v in vals)
+        accl = _klv(b"ACCL", b"s", 6, len(vals), payload)
+        inner = scal + accl
+        return _klv(b"STRM", b"\x00", 1, len(inner), inner)
+
+    p1 = _klv(b"DEVC", b"\x00", 1, len(strm_accl([(10, 0, 0)] * 4)),
+              strm_accl([(10, 0, 0)] * 4))          # |a| ~0.1 (raw 10/100=0.1)
+    p2 = _klv(b"DEVC", b"\x00", 1, len(strm_accl([(981, 0, 0)] * 4)),
+              strm_accl([(981, 0, 0)] * 4))         # |a| ~9.81 (~1 g)
+    blob = p1 + p2
+
+    sig = build_signals(blob, fs=10.0)
+    assert sig.has_accel is True
+    # both payloads contributed: min envelope reaches the deep dip, mean reaches ~1g
+    assert min(sig.accel_min) < 1.0            # the 0.1 m/s^2 dip survived
+    assert max(sig.accel_mag) > 5.0            # the ~9.81 payload survived
+    assert len(sig.accel_min) == len(sig.accel_mag) == len(sig.t_s)
+
+
+def test_pool_min_takes_bin_minimum():
+    assert pool_min([5.0, 1.0, 4.0, 3.0], 2) == [1.0, 3.0]
