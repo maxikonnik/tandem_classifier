@@ -8,6 +8,7 @@ import subprocess
 import numpy as np
 from PIL import Image
 
+from tandem.recon.ffprobe import keyframe_pts
 from tandem.visual.features import FrameFeature, frame_features
 
 
@@ -17,14 +18,22 @@ def load_gray(path: str) -> np.ndarray:
 
 
 def extract_keyframes(video: str, out_dir: str, fps_cap=None) -> list[str]:
+    if fps_cap is not None:
+        raise NotImplementedError("fps_cap not yet supported")
+
     os.makedirs(out_dir, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-y", "-skip_frame", "nokey", "-i", video,
-         "-vsync", "0", "-frame_pts", "1", "-vf", "scale=-2:720",
+         "-vsync", "0", "-vf", "scale=-2:720",
          os.path.join(out_dir, "kf_%06d.jpg")],
         check=True, capture_output=True,
     )
-    return sorted(glob.glob(os.path.join(out_dir, "kf_*.jpg")))
+    paths = sorted(glob.glob(os.path.join(out_dir, "kf_*.jpg")), key=_index_of)
+    pts = keyframe_pts(video)
+    with open(os.path.join(out_dir, "timestamps.txt"), "w") as fh:
+        for path, t in zip(paths, pts):
+            fh.write(f"{_index_of(path)} {t}\n")
+    return paths
 
 
 def _index_of(path: str) -> int:
@@ -39,7 +48,12 @@ def build_series(frame_dir: str) -> list[FrameFeature]:
     if os.path.exists(ts_path):
         with open(ts_path) as fh:
             for line in fh:
-                idx, t = line.split()
+                if not line.strip():
+                    continue
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                idx, t = parts
                 stamps[int(idx)] = float(t)
     series = []
     for path in sorted(glob.glob(os.path.join(frame_dir, "kf_*.jpg")), key=_index_of):

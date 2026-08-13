@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 from PIL import Image
-from tandem.visual.series import build_series, load_gray
+from tandem.visual.series import build_series, extract_keyframes, load_gray
 
 
 def test_load_gray_returns_2d(tmp_path):
@@ -16,3 +17,25 @@ def test_build_series_orders_by_index(tmp_path):
     series = build_series(str(tmp_path))
     assert [round(f.t_s) for f in series] == [0, 1, 2]
     assert series[1].blob_area_frac == 0.0   # a uniform (dark) frame has no *relative* dark pixels
+
+
+def test_build_series_with_real_timestamps(tmp_path):
+    # Create keyframe images
+    for i in range(2):
+        Image.fromarray(np.full((50, 50, 3), 128, np.uint8)).save(tmp_path / f"kf_{i}.jpg")
+    # Write real timestamps (non-evenly spaced)
+    with open(tmp_path / "timestamps.txt", "w") as f:
+        f.write("0 0.0\n")
+        f.write("1 2.5\n")
+    series = build_series(str(tmp_path))
+    assert len(series) == 2
+    assert series[0].t_s == 0.0
+    assert series[1].t_s == 2.5
+
+
+def test_extract_keyframes_fps_cap_not_implemented(tmp_path):
+    # fps_cap parameter should raise NotImplementedError if not None
+    dummy_video = tmp_path / "dummy.mp4"
+    dummy_video.write_text("dummy")
+    with pytest.raises(NotImplementedError, match="fps_cap not yet supported"):
+        extract_keyframes(str(dummy_video), str(tmp_path / "out"), fps_cap=30)
