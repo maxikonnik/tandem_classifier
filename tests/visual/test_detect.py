@@ -1,5 +1,5 @@
 from tandem.visual.features import FrameFeature
-from tandem.visual.detect import exit_by_background, VisualCue
+from tandem.visual.detect import exit_by_background, VisualCue, canopy_by_growth
 
 
 def _feat(t, structure=0.0, center=0.0, luma=200.0):
@@ -19,3 +19,17 @@ def test_exit_at_structure_drop():
 def test_no_exit_when_always_open():
     series = [_feat(t, structure=0.02) for t in range(20)]
     assert exit_by_background(series) is None
+
+
+def test_canopy_at_central_growth():
+    series = [_feat(t, center=0.02) for t in range(10)]     # small distant pair
+    series += [_feat(t, center=0.35) for t in range(10, 20)]  # canopy blooms at centre
+    cue = canopy_by_growth(series)
+    assert cue is not None and cue.type == "canopy_open" and cue.source == "visual"
+    assert 9.0 <= cue.t_s <= 12.0
+
+
+def test_after_s_restricts_search():
+    series = [_feat(t, center=0.02) for t in range(10)]
+    series += [_feat(t, center=0.35) for t in range(10, 20)]
+    assert canopy_by_growth(series, after_s=15.0) is None   # growth is before 15 s
