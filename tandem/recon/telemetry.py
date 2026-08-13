@@ -16,12 +16,16 @@ from tandem.recon.ffprobe import find_gpmf_stream_index
 from tandem.recon.gpmf import decode_numbers, decode_utc, iter_klv, walk
 
 
+FIRMWARE_DEFAULT_YEAR = 2021
+
+
 @dataclass
 class Telemetry:
     device_id: int | None = None
     first_utc: datetime | None = None
     has_gps: bool = False
     has_utc: bool = False
+    utc_reliable: bool = False
     speed_3d_ms: list[float] = field(default_factory=list)
     t_s: list[float] = field(default_factory=list)
 
@@ -42,14 +46,28 @@ def parse_telemetry_blob(blob: bytes) -> Telemetry:
             continue
         scal = None
         gps5 = None
+        gpsu = None
+        gpsf = None
         for c in iter_klv(strm.payload):
-            if c.key == "GPSU" and not tel.has_utc:
-                tel.first_utc = decode_utc(c.payload)
-                tel.has_utc = True
+            if c.key == "GPSU":
+                gpsu = c
+            elif c.key == "GPSF":
+                gpsf = decode_numbers(c)[0][0]
             elif c.key == "SCAL":
                 scal = _flatten(c)
             elif c.key == "GPS5":
                 gps5 = c
+        if gpsu is not None:
+            when = decode_utc(gpsu.payload)
+            fixed = gpsf is not None and gpsf >= 2
+            if fixed and not tel.utc_reliable:
+                tel.first_utc = when
+                tel.has_utc = True
+                tel.utc_reliable = True
+            elif tel.first_utc is None:
+                tel.first_utc = when          # fallback, but unreliable
+                tel.has_utc = True
+                tel.utc_reliable = when.year != FIRMWARE_DEFAULT_YEAR
         if gps5 is not None:
             tel.has_gps = True
             if scal and len(scal) >= 5 and scal[4]:

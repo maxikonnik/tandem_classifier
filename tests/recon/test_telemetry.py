@@ -38,3 +38,28 @@ def test_parse_blob_without_gps_flags_absence():
     assert tel.has_gps is False
     assert tel.has_utc is False
     assert tel.first_utc is None
+
+
+def test_utc_from_fixed_sample_is_reliable():
+    # STRM 1: GPSF=0 (no fix), GPSU=firmware default. STRM 2: GPSF=3, GPSU=real.
+    gpsf0 = _klv(b"GPSF", b"L", 4, 1, struct.pack(">I", 0))
+    gpsu0 = _klv(b"GPSU", b"U", 16, 1, b"210307000002.300")
+    strm0 = _klv(b"STRM", b"\x00", 1, len(gpsf0 + gpsu0), gpsf0 + gpsu0)
+    gpsf3 = _klv(b"GPSF", b"L", 4, 1, struct.pack(">I", 3))
+    gpsu3 = _klv(b"GPSU", b"U", 16, 1, b"260523143500.000")
+    strm3 = _klv(b"STRM", b"\x00", 1, len(gpsf3 + gpsu3), gpsf3 + gpsu3)
+    devc = _klv(b"DEVC", b"\x00", 1, len(strm0 + strm3), strm0 + strm3)
+
+    tel = parse_telemetry_blob(devc)
+    assert tel.utc_reliable is True
+    assert tel.first_utc.year == 2026 and tel.first_utc.month == 5
+
+
+def test_only_prefix_default_utc_is_unreliable():
+    gpsf0 = _klv(b"GPSF", b"L", 4, 1, struct.pack(">I", 0))
+    gpsu0 = _klv(b"GPSU", b"U", 16, 1, b"210307000002.300")
+    strm0 = _klv(b"STRM", b"\x00", 1, len(gpsf0 + gpsu0), gpsf0 + gpsu0)
+    devc = _klv(b"DEVC", b"\x00", 1, len(strm0), strm0)
+
+    tel = parse_telemetry_blob(devc)
+    assert tel.utc_reliable is False
