@@ -140,3 +140,39 @@ def test_freefall_ends_at_opening_shock():
     assert seg.start_s <= ev.t_s + 0.5
     # freefall must END at the opening shock (~53s), not run to the recording end (~56s)
     assert 51.0 <= seg.end_s <= 54.0
+
+
+def test_freefall_argmax_ignores_earlier_smaller_spike():
+    # Prove that argmax chooses the LARGEST peak, not the first spike above threshold.
+    # Fixture: exit ~10s, freefall with an in-air maneuver spike (~2.6g) at ~30s,
+    # then continued freefall, then a real opening shock (~3.5g) at ~55s.
+    fs = 10.0
+    amin, amag = [], []
+    # 0-10s: in aircraft ~1g, with real dip at exit
+    for _ in range(int(10 * fs)):
+        amin.append(0.9 * G); amag.append(1.0 * G)
+    # 10-13s: exit dropout, >1s dip
+    for _ in range(int(3 * fs)):
+        amin.append(0.1 * G); amag.append(0.3 * G)
+    # 13-30s: freefall at ~1g
+    for _ in range(int(17 * fs)):
+        amin.append(0.8 * G); amag.append(1.0 * G)
+    # 30-31s: in-air maneuver spike ~2.6g (above threshold but brief and smaller)
+    for _ in range(int(1 * fs)):
+        amin.append(2.3 * G); amag.append(2.6 * G)
+    # 31-55s: continued freefall at ~1g
+    for _ in range(int(24 * fs)):
+        amin.append(0.8 * G); amag.append(1.0 * G)
+    # 55-58s: real opening shock ~3.5g (larger than the maneuver spike)
+    for _ in range(int(3 * fs)):
+        amin.append(3.0 * G); amag.append(3.5 * G)
+    t = [i / fs for i in range(len(amin))]
+    speed = [0.0] * len(amin)  # NO GPS
+    sig = Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=speed,
+                  fs=fs, has_accel=True, has_gps=False)
+    ev = detect_exit(sig)
+    seg = detect_freefall(sig, ev)
+    assert seg is not None and seg.type == "freefall"
+    assert seg.start_s <= ev.t_s + 0.5
+    # freefall must END at the REAL shock (~55s), NOT the earlier maneuver spike (~30s)
+    assert 53.0 <= seg.end_s <= 57.0

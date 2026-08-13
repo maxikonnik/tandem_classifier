@@ -17,9 +17,6 @@ OPENING_SHOCK_G = 2.5      # a real canopy opening (~2-6g) towers over freefall 
 FREEFALL_MIN_S = 15.0
 FREEFALL_MAX_S = 90.0
 FREEFALL_MIN_MS = 45.0
-FREEFALL_MAX_MS = 60.0
-ONEG_LOW_G = 0.6
-ONEG_HIGH_G = 1.4
 GROUND_SPEED_MS = 3.0
 
 
@@ -75,11 +72,6 @@ class Segment:
     end_s: float
     source: str
     confidence: float
-
-
-def _is_freefall_sample(a: float, v: float) -> bool:
-    return (FREEFALL_MIN_MS <= v <= FREEFALL_MAX_MS
-            and ONEG_LOW_G * G <= a <= ONEG_HIGH_G * G)
 
 
 def detect_freefall(sig, exit_event):
