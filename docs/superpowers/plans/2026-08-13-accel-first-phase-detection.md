@@ -22,10 +22,10 @@
 
 A real 202 s recording (Родионов `GX012475.MP4`, no GPS) yielded 201 ACCL payloads / 40353 samples at ~200 Hz. The current `build_signals` returned **5 samples (~1 s)** for the same file — it reads only the first DEVC payload. That is the first thing to fix; every downstream number depends on it.
 
-Observed `|a|` envelope (in g): steady phases sit at ~1.0 g with std ~0.01–0.05; movement/freefall shows std ~0.10–0.15; **exit/free-fall onset dips to ~0.09 g** (near true 0 g); **opening-shock / maneuver spikes reach 2.3–2.9 g**. So:
-- **Exit** = a sustained dip of `|a|` below ~0.35 g (the 0.09 g minima), lasting at least ~1 s — this is unique to free-fall onset and needs no GPS.
-- **Freefall** = from the exit dip until the **opening shock** (first sustained spike above ~1.8 g after exit); this trims the window at both ends.
-- **Downsampling erases the exit transient.** A 5 s mean stays ~1 g even when the 1 s minimum is 0.09 g. So the resampled grid must **preserve the minimum envelope** for dropout detection (min-pooling), not linear-average it away.
+Observed `|a|` envelope (in g): steady phases sit at ~1.0 g with std ~0.01–0.05; movement/free-fall shows std ~0.10–0.15; **exit/free-fall onset dips to ~0.1 g** (near true 0 g); ground camera-handling bumps also hit ~2.3–2.9 g but last <1 s. **Validated on a real accel-only jump** (Дмитрий `GX010015`, no GPS used): the deepest smoothed (~1 s) `|a|` dip = **0.39 g at t=39.1 s** (raw min 0.13 g) is the exit, and the **largest post-exit spike = 5.89 g at t=91.8 s** is the canopy opening — a ~39–92 s free-fall that matched an independent vision review exactly. So:
+- **Exit** = the sustained near-0g dip in the **min-pooled envelope** (below ~0.35 g), lasting ≥1 s — unique to free-fall onset, needs no GPS. Raw `|a|` is too noisy to threshold directly (it briefly spikes above 0.5 g even mid-dip); threshold the min envelope, not the raw signal.
+- **Freefall** = from the exit dip to the **opening shock**, detected as the **largest `|a|` peak in the plausible free-fall window** (≈15–90 s after exit), NOT a first-crossing — real openings (~2–6 g, here 5.89 g) tower over free-fall buffeting and maneuvers (~2–3 g), so a low first-crossing threshold would truncate the window on an in-air turn.
+- **Downsampling erases the exit transient.** A 5 s mean stays ~1 g even when the 1 s minimum is 0.1 g. So the resampled grid must **preserve the minimum envelope** for dropout detection (min-pooling), not linear-average it away.
 
 ## File Structure
 
@@ -256,7 +256,7 @@ Redefine exit as a sustained near-0g accelerometer dip, requiring no GPS. GPS sp
 
 **Interfaces:**
 - Consumes: `Signals` (now with `accel_min`).
-- Produces: constants `EXIT_MIN_DURATION_S = 1.0`, `OPENING_SHOCK_G = 1.8`. `detect_exit(sig)` uses `accel_min` (min envelope) for the dropout, requires the dip to last at least `EXIT_MIN_DURATION_S`, and does **not** require GPS speed. Confidence is higher when GPS speed after the dip exceeds `FREEFALL_MIN_MS`.
+- Produces: constants `EXIT_MIN_DURATION_S = 1.0`, `OPENING_SHOCK_G = 2.5`, `FREEFALL_MIN_S = 15.0`, `FREEFALL_MAX_S = 90.0`. `detect_exit(sig)` uses `accel_min` (min envelope) for the dropout, requires the dip to last at least `EXIT_MIN_DURATION_S`, and does **not** require GPS speed. Confidence is higher when GPS speed after the dip exceeds `FREEFALL_MIN_MS`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -271,8 +271,8 @@ def _accel_only_flight(fs=10.0):
         amin.append(0.1 * G); amag.append(0.3 * G)
     for _ in range(int(40 * fs)):      # freefall ~1g, noisy
         amin.append(0.8 * G); amag.append(1.0 * G)
-    for _ in range(int(3 * fs)):       # opening shock ~2.2g
-        amin.append(1.9 * G); amag.append(2.2 * G)
+    for _ in range(int(3 * fs)):       # opening shock ~3.5g (towers over buffeting)
+        amin.append(3.0 * G); amag.append(3.5 * G)
     t = [i / fs for i in range(len(amin))]
     speed = [0.0] * len(amin)          # NO GPS
     return Signals(t_s=t, accel_mag=amag, accel_min=amin, speed_3d=speed,
@@ -310,7 +310,9 @@ Expected: FAIL — current `detect_exit` requires `speed_3d` to reach `FREEFALL_
 Replace `detect_exit` in `tandem/phases/detect.py`:
 ```python
 EXIT_MIN_DURATION_S = 1.0
-OPENING_SHOCK_G = 1.8
+OPENING_SHOCK_G = 2.5      # a real canopy opening (~2-6g) towers over freefall buffeting (~2-3g)
+FREEFALL_MIN_S = 15.0
+FREEFALL_MAX_S = 90.0
 
 
 def detect_exit(sig):
@@ -359,7 +361,7 @@ Freefall ends at the canopy opening shock — the first sustained `|a|` spike ab
 - Test: `tests/phases/test_detect.py`
 
 **Interfaces:**
-- Produces: `detect_freefall(sig, exit_event) -> Segment | None` redefined — freefall spans from `exit_event.t_s` to the first opening-shock spike (`accel_mag` above `OPENING_SHOCK_G * G` sustained ~1 s); if no shock is found, to the end of signal. GPS band is used only as an extra guard when present.
+- Produces: `detect_freefall(sig, exit_event) -> Segment | None` redefined — freefall spans from `exit_event.t_s` to the **largest `accel_mag` peak** within `[exit+FREEFALL_MIN_S, exit+FREEFALL_MAX_S]` (the canopy opening), provided that peak reaches `OPENING_SHOCK_G * G`; if no qualifying peak, the window is capped at `exit+FREEFALL_MAX_S`. Taking the max (not a first-crossing) prevents an in-air maneuver from truncating the window early.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -384,26 +386,19 @@ Expected: FAIL — the current `detect_freefall` uses the GPS speed band (all ze
 
 Replace `detect_freefall` in `tandem/phases/detect.py`:
 ```python
-def _opening_shock_index(sig, start_idx):
-    hi = OPENING_SHOCK_G * G
-    need = max(1, int(round(1.0 * sig.fs)))
-    run = 0
-    for i in range(start_idx, len(sig.accel_mag)):
-        if sig.accel_mag[i] >= hi:
-            run += 1
-            if run >= need:
-                return i - run + 1
-        else:
-            run = 0
-    return None
-
-
 def detect_freefall(sig, exit_event):
     if exit_event is None or not sig.accel_mag:
         return None
     start_idx = min(range(len(sig.t_s)), key=lambda i: abs(sig.t_s[i] - exit_event.t_s))
-    shock = _opening_shock_index(sig, start_idx + 1)
-    end_idx = shock if shock is not None else len(sig.t_s) - 1
+    lo = start_idx + int(round(FREEFALL_MIN_S * sig.fs))
+    hi = min(len(sig.accel_mag), start_idx + int(round(FREEFALL_MAX_S * sig.fs)))
+    end_idx = None
+    if lo < hi:
+        peak = max(range(lo, hi), key=lambda i: sig.accel_mag[i])
+        if sig.accel_mag[peak] >= OPENING_SHOCK_G * G:   # the opening towers over buffeting
+            end_idx = peak
+    if end_idx is None:                                   # no clear opening -> cap at max plausible freefall
+        end_idx = min(hi, len(sig.t_s) - 1)
     if end_idx <= start_idx:
         return None
     return Segment(type="freefall", start_s=sig.t_s[start_idx], end_s=sig.t_s[end_idx],
