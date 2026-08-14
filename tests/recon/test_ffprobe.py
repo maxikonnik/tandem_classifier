@@ -2,7 +2,18 @@ import shutil
 
 import pytest
 
-from tandem.recon.ffprobe import keyframe_interval_stats, find_gpmf_stream_index, has_ffmpeg
+from tandem.recon.ffprobe import keyframe_interval_stats, find_gpmf_stream_index, has_ffmpeg, _parse_packet_times
+
+
+def test_parse_packet_times_extracts_pairs_and_skips_incomplete():
+    data = {
+        "packets": [
+            {"pts_time": "0.000000", "duration_time": "1.001000"},
+            {"pts_time": "1.001000", "duration_time": "1.001000"},
+            {"pts_time": "2.002000"},  # missing duration -> skipped
+        ]
+    }
+    assert _parse_packet_times(data) == [(0.0, 1.001), (1.001, 1.001)]
 
 
 def test_interval_stats_from_pts():

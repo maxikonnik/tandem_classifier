@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoPro accelerometer player</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="bar">
+    <label for="filesel">Файл</label>
+    <select id="filesel"></select>
+    <button id="browse">Обзор</button>
+  </div>
+
+  <div id="stage">
+    <video id="video" controls preload="metadata"></video>
+    <div id="videomsg"></div>
+  </div>
+
+  <canvas id="scrub" height="240"></canvas>
+
+  <div class="controls">
+    <span id="tlabel" class="mono">00:00 / 00:00</span>
+    <span class="spacer"></span>
+    <div id="mode">
+      <button data-m="mag" class="mbtn on">|a|</button>
+      <button data-m="xyz" class="mbtn">X / Y / Z</button>
+    </div>
+  </div>
+  <div id="warnings"></div>
+
+  <div id="modal" class="hidden">
+    <div class="dialog">
+      <div class="dhead">
+        <span id="crumb" class="mono"></span>
+        <button id="usefolder">Выбрать эту папку</button>
+        <button id="closem">✕</button>
+      </div>
+      <div id="fslist"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
