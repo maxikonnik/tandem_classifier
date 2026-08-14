@@ -21,6 +21,8 @@ def list_dir(path: str) -> list[DirEntry]:
     files: list[DirEntry] = []
     with os.scandir(path) as it:
         for entry in it:
+            if entry.name.startswith("."):
+                continue
             full = os.path.join(path, entry.name)
             if entry.is_dir():
                 dirs.append(DirEntry(entry.name, full, True))

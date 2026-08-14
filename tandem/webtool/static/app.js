@@ -64,6 +64,15 @@ canvas.addEventListener("click", (e) => {
   video.currentTime = (e.clientX - r.left) / r.width * duration();
 });
 
+let scrubbing = false;
+function seekFromEvent(e) {
+  const r = canvas.getBoundingClientRect();
+  video.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * duration();
+}
+canvas.addEventListener("mousedown", (e) => { scrubbing = true; seekFromEvent(e); });
+window.addEventListener("mousemove", (e) => { if (scrubbing) seekFromEvent(e); });
+window.addEventListener("mouseup", () => { scrubbing = false; });
+
 document.querySelectorAll(".mbtn").forEach((b) => {
   b.addEventListener("click", () => {
     mode = b.dataset.m;

@@ -19,6 +19,14 @@ def test_list_dir_returns_dirs_then_mp4_sorted(tmp_path):
     assert all(isinstance(e, DirEntry) for e in entries)
 
 
+def test_list_dir_skips_dotfiles_including_proxies(tmp_path):
+    (tmp_path / "clip.mp4").write_bytes(b"x")
+    (tmp_path / ".clip.proxy.mp4").write_bytes(b"x")
+    (tmp_path / ".hidden").mkdir()
+    names = [e.name for e in list_dir(str(tmp_path))]
+    assert names == ["clip.mp4"]
+
+
 def test_resolve_within_accepts_child_and_rejects_escape(tmp_path):
     root = str(tmp_path)
     child = os.path.join(root, "sub", "clip.mp4")
