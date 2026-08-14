@@ -44,6 +44,14 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
     return start, end
 
 
+def safe_static_path(rel: str) -> str | None:
+    base = os.path.normpath(STATIC_DIR)
+    full = os.path.normpath(os.path.join(base, rel))
+    if full == base or full.startswith(base + os.sep):
+        return full
+    return None
+
+
 def make_handler(roots: list[str]) -> type:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep the console quiet
@@ -87,14 +95,15 @@ def make_handler(roots: list[str]) -> type:
             self.send_error(404)
 
         def _static(self, rel):
-            full = os.path.join(STATIC_DIR, rel)
-            if not os.path.isfile(full):
+            full = safe_static_path(rel)
+            if full is None or not os.path.isfile(full):
                 return self.send_error(404)
             ctype = {
                 ".html": "text/html", ".js": "text/javascript",
                 ".css": "text/css",
             }.get(os.path.splitext(full)[1], "application/octet-stream")
-            data = open(full, "rb").read()
+            with open(full, "rb") as fh:
+                data = fh.read()
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))

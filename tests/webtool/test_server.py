@@ -1,4 +1,4 @@
-from tandem.webtool.server import parse_range
+from tandem.webtool.server import parse_range, safe_static_path
 
 
 def test_parse_range_none_when_absent():
@@ -15,3 +15,13 @@ def test_parse_range_explicit_end_is_inclusive():
 
 def test_parse_range_end_beyond_size_is_clamped():
     assert parse_range("bytes=900-5000", 1000) == (900, 999)
+
+
+def test_safe_static_allows_normal_file():
+    p = safe_static_path("app.js")
+    assert p is not None and p.endswith("app.js")
+
+
+def test_safe_static_rejects_traversal():
+    assert safe_static_path("../server.py") is None
+    assert safe_static_path("../../pyproject.toml") is None
