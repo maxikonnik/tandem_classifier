@@ -26,3 +26,10 @@ def test_resolve_within_accepts_child_and_rejects_escape(tmp_path):
 
     escape = os.path.join(root, "..", "secret.mp4")
     assert resolve_within(escape, [root]) is None
+
+
+def test_resolve_within_accepts_child_of_filesystem_root(tmp_path):
+    drive, _ = os.path.splitdrive(str(tmp_path))
+    root = drive + os.sep if drive else os.sep  # "C:\\" on Windows, "/" on POSIX
+    child = str(tmp_path)
+    assert resolve_within(child, [root]) == os.path.abspath(child)

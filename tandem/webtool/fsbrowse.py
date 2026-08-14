@@ -39,7 +39,7 @@ def resolve_within(path: str, roots: list[str]) -> str | None:
     target = _norm(path)
     for root in roots:
         base = _norm(root)
-        if target == base or target.startswith(base + os.sep):
+        if target == base or target.startswith(base.rstrip(os.sep) + os.sep):
             return os.path.abspath(path)
     return None
 
