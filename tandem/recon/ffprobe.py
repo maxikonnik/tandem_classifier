@@ -71,3 +71,31 @@ def keyframe_interval_stats(pts: list[float]) -> IntervalStats:
         min_s=min(deltas),
         max_s=max(deltas),
     )
+
+
+def _parse_packet_times(data: dict) -> list[tuple[float, float]]:
+    pairs: list[tuple[float, float]] = []
+    for pkt in data.get("packets", []):
+        pts = pkt.get("pts_time")
+        dur = pkt.get("duration_time")
+        if pts is not None and dur is not None:
+            pairs.append((float(pts), float(dur)))
+    return pairs
+
+
+def gpmd_packet_times(path: str, stream_index: int) -> list[tuple[float, float]]:
+    data = _run_json([
+        "ffprobe", "-v", "error", "-select_streams", str(stream_index),
+        "-show_packets", "-show_entries", "packet=pts_time,duration_time",
+        "-print_format", "json", path,
+    ])
+    return _parse_packet_times(data)
+
+
+def probe_duration(path: str) -> float | None:
+    data = _run_json([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-print_format", "json", path,
+    ])
+    raw = data.get("format", {}).get("duration")
+    return float(raw) if raw is not None else None
