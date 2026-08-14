@@ -127,11 +127,16 @@ file's path — only its name and bytes. So all path knowledge comes from
 the server-side browser, never from a browser file input. This is why
 there is no drag-and-drop and no OS file dialog.
 
-Safety: `/accel`, `/video`, and `/proxy` resolve the requested path and
-require it to sit under one of the currently-active roots (the set the
-user controls via Обзор), rejecting traversal attempts with 403. On a
-local single-user tool this is light defense, but it keeps a crafted
-request from reaching arbitrary files.
+Safety: because Обзор is meant to reach any file on the machine, the
+allowed set for `/accel`, `/video`, and `/proxy` is the active roots plus
+every filesystem drive root, so any real path resolves — this is
+deliberate and honors the "browse any file/folder" requirement. The
+`resolve_within` guard therefore only normalizes the path and blocks
+nothing reachable; its remaining value is rejecting malformed input. The
+`/static/` handler is separately confined to the static directory via
+`safe_static_path`. This whole-filesystem reach is acceptable only
+because the server binds to `127.0.0.1` for a single local user; it must
+not be exposed on a network.
 
 ## UI
 
