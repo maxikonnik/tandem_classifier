@@ -13,6 +13,8 @@ from tandem.phases.detect import Event, Segment
 FREEFALL_STD_MIN = 0.2   # freefall accel_std should exceed this (corroboration)
 ORBIT_STD_MAX = 0.18     # an orbit dip's accel_std stays below this
 ORBIT_MIN_DURATION_S = 3.0
+ORBIT_MIN_AFTER_EXIT_S = 15.0  # skip the freefall-onset settling (|a| rising smoothly = low std,
+                               # but not an orbit); a real облёт is a low-std dip in established freefall
 BREAKOFF_AXIS_EXCURSION_G = 0.8  # per-axis deviation from freefall baseline that flags break-off
 BREAKOFF_BASELINE_S = 5.0        # trailing window of freefall used to compute each axis's baseline
 
@@ -36,7 +38,8 @@ def detect_orbit(sig, freefall) -> list[Segment]:
     """Find contiguous low-std runs within the freefall window (orbit candidates)."""
     if freefall is None or not sig.accel_std:
         return []
-    idxs = _indices_in_window(sig, freefall.start_s, freefall.end_s)
+    # search only established freefall, past the onset settling period
+    idxs = _indices_in_window(sig, freefall.start_s + ORBIT_MIN_AFTER_EXIT_S, freefall.end_s)
     if not idxs:
         return []
 

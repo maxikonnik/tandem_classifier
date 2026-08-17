@@ -173,7 +173,9 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     sig.ax = resample(ax_raw, n_out) if ax_raw else [0.0] * n_out
     sig.ay = resample(ay_raw, n_out) if ay_raw else [0.0] * n_out
     sig.az = resample(az_raw, n_out) if az_raw else [0.0] * n_out
-    sig.accel_std = rolling_std(sig.accel_mag, round(STD_WINDOW_S * fs))
+    # accel_std is in g (oscillation amplitude): the orbit/freefall thresholds are
+    # calibrated in g against real footage, so std must be on |a|/G, not the m/s^2 magnitude.
+    sig.accel_std = rolling_std([a / G for a in sig.accel_mag], round(STD_WINDOW_S * fs))
     return sig
 
 
