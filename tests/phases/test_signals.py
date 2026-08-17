@@ -1,6 +1,6 @@
 import struct
 
-from tandem.phases.signals import Signals, resample, build_signals, pool_min
+from tandem.phases.signals import Signals, resample, build_signals, pool_min, rolling_std
 
 
 def _klv(key, type_char, sample_size, repeat, payload):
@@ -97,3 +97,43 @@ def test_build_signals_accumulates_across_payloads():
 
 def test_pool_min_takes_bin_minimum():
     assert pool_min([5.0, 1.0, 4.0, 3.0], 2) == [1.0, 3.0]
+
+
+def test_rolling_std_low_in_flat_region_high_across_step():
+    out = rolling_std([1, 1, 1, 5, 5, 5], 3)
+    assert len(out) == 6
+    # deep in the flat regions: window is all-equal -> std ~0
+    assert out[0] < 1e-6
+    assert out[5] < 1e-6
+    # centered on the step: window straddles 1s and 5s -> high std
+    assert out[2] > 1.0
+    assert out[3] > 1.0
+    assert out[2] > out[0]
+
+
+def test_build_signals_per_axis_and_std_aligned_and_sensible():
+    # Two payloads: axis x held at ~1g (981/981=1.0 after /100 SCAL /9.80665... )
+    # Use raw values scaled so that after /SCAL(100)/G(9.80665) axis x ~= 1.0 g.
+    raw_x = round(9.80665 * 100)  # -> /100 -> 9.80665 m/s^2 -> /G -> 1.0 g
+    accl_scal = _klv(b"SCAL", b"s", 2, 1, struct.pack(">h", 100))
+
+    def strm_accl(vals):
+        payload = b"".join(struct.pack(">3h", *v) for v in vals)
+        accl = _klv(b"ACCL", b"s", 6, len(vals), payload)
+        inner = accl_scal + accl
+        return _klv(b"STRM", b"\x00", 1, len(inner), inner)
+
+    p1 = _klv(b"DEVC", b"\x00", 1, len(strm_accl([(raw_x, 0, 0)] * 4)),
+              strm_accl([(raw_x, 0, 0)] * 4))
+    p2 = _klv(b"DEVC", b"\x00", 1, len(strm_accl([(raw_x, 0, 0)] * 4)),
+              strm_accl([(raw_x, 0, 0)] * 4))
+    blob = p1 + p2
+
+    sig = build_signals(blob, fs=10.0)
+    assert sig.has_accel is True
+    n = len(sig.accel_mag)
+    assert len(sig.ax) == len(sig.ay) == len(sig.az) == len(sig.accel_std) == n
+    # x axis reads ~1g throughout; y/z stay ~0
+    assert all(abs(v - 1.0) < 1e-3 for v in sig.ax)
+    assert all(abs(v) < 1e-6 for v in sig.ay)
+    assert all(abs(v) < 1e-6 for v in sig.az)

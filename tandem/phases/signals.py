@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from tandem.recon.gpmf import decode_numbers, iter_klv, walk
 from tandem.recon.telemetry import extract_gpmf_blob
 
+G = 9.80665  # standard gravity, m/s^2 -> g conversion
+STD_WINDOW_S = 1.0  # rolling-std window for the oscillation feature
+
 
 @dataclass
 class Signals:
@@ -21,6 +24,10 @@ class Signals:
     accel_mag: list[float] = field(default_factory=list)
     accel_min: list[float] = field(default_factory=list)
     speed_3d: list[float] = field(default_factory=list)
+    ax: list[float] = field(default_factory=list)
+    ay: list[float] = field(default_factory=list)
+    az: list[float] = field(default_factory=list)
+    accel_std: list[float] = field(default_factory=list)
     fs: float = 10.0
     has_accel: bool = False
     has_gps: bool = False
@@ -48,6 +55,25 @@ def resample(values: list[float], n_out: int) -> list[float]:
     return out
 
 
+def rolling_std(values: list[float], win: int) -> list[float]:
+    """Population std over a centered window, clamped to the array bounds.
+
+    For index i, uses values[max(0, i-win//2) : min(n, i+win//2+1)].
+    Returns a list the same length as `values`.
+    """
+    n = len(values)
+    half = max(win, 0) // 2
+    out = []
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        window = values[lo:hi]
+        m = sum(window) / len(window)
+        var = sum((v - m) ** 2 for v in window) / len(window)
+        out.append(math.sqrt(var))
+    return out
+
+
 def pool_min(values: list[float], n_out: int) -> list[float]:
     if not values or n_out <= 0:
         return []
@@ -66,7 +92,8 @@ def _stream_children(blob: bytes):
             yield list(iter_klv(strm.payload))
 
 
-def _accel_magnitudes(children) -> list[float] | None:
+def _accel_magnitudes(children) -> tuple[list[float], list[float], list[float], list[float]] | None:
+    """Return (|a| in m/s^2, ax, ay, az in g) for one ACCL payload, or None."""
     scal = None
     accl = None
     for c in children:
@@ -77,10 +104,18 @@ def _accel_magnitudes(children) -> list[float] | None:
     if accl is None:
         return None
     divisor = float(scal[0]) if (scal and scal[0]) else 1.0
-    mags = []
+    mags: list[float] = []
+    ax: list[float] = []
+    ay: list[float] = []
+    az: list[float] = []
     for sample in decode_numbers(accl):
-        mags.append(math.sqrt(sum((v / divisor) ** 2 for v in sample)))
-    return mags
+        corrected = [v / divisor for v in sample]
+        mags.append(math.sqrt(sum(v ** 2 for v in corrected)))
+        if len(corrected) >= 3:
+            ax.append(corrected[0] / G)
+            ay.append(corrected[1] / G)
+            az.append(corrected[2] / G)
+    return mags, ax, ay, az
 
 
 def _gps_speeds(children) -> list[float] | None:
@@ -104,6 +139,9 @@ def _gps_speeds(children) -> list[float] | None:
 
 def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     accel_raw: list[float] = []
+    ax_raw: list[float] = []
+    ay_raw: list[float] = []
+    az_raw: list[float] = []
     speed_raw: list[float] = []
     saw_accel = False
     saw_gps = False
@@ -111,7 +149,11 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
         a = _accel_magnitudes(children)
         if a is not None:
             saw_accel = True
-            accel_raw.extend(a)
+            mags, ax, ay, az = a
+            accel_raw.extend(mags)
+            ax_raw.extend(ax)
+            ay_raw.extend(ay)
+            az_raw.extend(az)
         s = _gps_speeds(children)
         if s is not None:
             saw_gps = True
@@ -128,6 +170,10 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     sig.accel_mag = resample(accel_raw, n_out) if accel_raw else [0.0] * n_out
     sig.accel_min = pool_min(accel_raw, n_out) if accel_raw else [0.0] * n_out
     sig.speed_3d = resample(speed_raw, n_out) if speed_raw else [0.0] * n_out
+    sig.ax = resample(ax_raw, n_out) if ax_raw else [0.0] * n_out
+    sig.ay = resample(ay_raw, n_out) if ay_raw else [0.0] * n_out
+    sig.az = resample(az_raw, n_out) if az_raw else [0.0] * n_out
+    sig.accel_std = rolling_std(sig.accel_mag, round(STD_WINDOW_S * fs))
     return sig
 
 
