@@ -8,11 +8,13 @@ buffeting through relative wind. All results carry source="telemetry".
 """
 from __future__ import annotations
 
-from tandem.phases.detect import Segment
+from tandem.phases.detect import Event, Segment
 
 FREEFALL_STD_MIN = 0.2   # freefall accel_std should exceed this (corroboration)
 ORBIT_STD_MAX = 0.18     # an orbit dip's accel_std stays below this
 ORBIT_MIN_DURATION_S = 3.0
+BREAKOFF_AXIS_EXCURSION_G = 0.8  # per-axis deviation from freefall baseline that flags break-off
+BREAKOFF_BASELINE_S = 5.0        # trailing window of freefall used to compute each axis's baseline
 
 
 def _indices_in_window(sig, start_s, end_s):
@@ -63,3 +65,43 @@ def _emit_if_long_enough(sig, start_idx, end_idx, segments):
         confidence = round(max(0.5, min(0.95, 1.0 - mean_std / ORBIT_STD_MAX * 0.5)), 3)
         segments.append(Segment(type="orbit", start_s=start_s, end_s=end_s,
                                  source="telemetry", confidence=confidence))
+
+
+def _axis_baseline(sig, values, freefall):
+    """Mean of `values` over the last BREAKOFF_BASELINE_S seconds of freefall."""
+    baseline_start = freefall.end_s - BREAKOFF_BASELINE_S
+    idxs = _indices_in_window(sig, baseline_start, freefall.end_s)
+    if not idxs:
+        return None
+    return sum(values[i] for i in idxs) / len(idxs)
+
+
+def detect_breakoff(sig, freefall) -> Event | None:
+    """First post-freefall sample where any axis (ax/ay/az) swings past its
+    freefall baseline by more than BREAKOFF_AXIS_EXCURSION_G (in g).
+
+    Mounting-agnostic: which axis catches the operator turning away from the
+    pair varies by camera orientation, so this picks whichever axis deviates
+    most rather than hard-coding one. Marks the end of useful tracking footage.
+    """
+    if freefall is None:
+        return None
+    axes = [sig.ax, sig.ay, sig.az]
+    if not any(axes):
+        return None
+    baselines = [_axis_baseline(sig, axis, freefall) for axis in axes]
+    if any(b is None for b in baselines):
+        return None
+
+    post_idxs = [i for i, t in enumerate(sig.t_s) if t > freefall.end_s]
+    if not post_idxs:
+        return None
+
+    for i in post_idxs:
+        deviations = [abs(axis[i] - baseline) for axis, baseline in zip(axes, baselines)]
+        max_dev = max(deviations)
+        if max_dev > BREAKOFF_AXIS_EXCURSION_G:
+            conf = round(max(0.5, min(0.99, 0.5 + (max_dev - BREAKOFF_AXIS_EXCURSION_G) * 0.3)), 3)
+            return Event(type="operator_breakoff", t_s=sig.t_s[i],
+                         source="telemetry", confidence=conf)
+    return None
