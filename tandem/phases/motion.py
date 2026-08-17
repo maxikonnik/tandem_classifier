@@ -16,7 +16,9 @@ ORBIT_MIN_DURATION_S = 3.0
 ORBIT_MIN_AFTER_EXIT_S = 15.0  # skip the freefall-onset settling (|a| rising smoothly = low std,
                                # but not an orbit); a real облёт is a low-std dip in established freefall
 BREAKOFF_AXIS_EXCURSION_G = 0.8  # per-axis deviation from freefall baseline that flags break-off
-BREAKOFF_BASELINE_S = 5.0        # trailing window of freefall used to compute each axis's baseline
+BREAKOFF_BASELINE_S = 5.0        # window of established freefall used to compute each axis's baseline
+BREAKOFF_SEARCH_LATE_S = 20.0    # the turn-away precedes the operator's deploy (=freefall end); search the last N s
+BREAKOFF_SUSTAIN_S = 1.0         # the excursion must be sustained (not a transient buffeting spike)
 
 
 def _indices_in_window(sig, start_s, end_s):
@@ -71,21 +73,26 @@ def _emit_if_long_enough(sig, start_idx, end_idx, segments):
 
 
 def _axis_baseline(sig, values, freefall):
-    """Mean of `values` over the last BREAKOFF_BASELINE_S seconds of freefall."""
-    baseline_start = freefall.end_s - BREAKOFF_BASELINE_S
-    idxs = _indices_in_window(sig, baseline_start, freefall.end_s)
+    """Mean of `values` over a stable window in ESTABLISHED freefall (after the
+    onset settling, before any late turn-away) — the tracking orientation."""
+    lo = freefall.start_s + ORBIT_MIN_AFTER_EXIT_S
+    hi = min(lo + BREAKOFF_BASELINE_S, freefall.end_s)
+    idxs = _indices_in_window(sig, lo, hi)
     if not idxs:
         return None
     return sum(values[i] for i in idxs) / len(idxs)
 
 
 def detect_breakoff(sig, freefall) -> Event | None:
-    """First post-freefall sample where any axis (ax/ay/az) swings past its
-    freefall baseline by more than BREAKOFF_AXIS_EXCURSION_G (in g).
+    """The operator turning away from the pair — a SUSTAINED axis excursion in
+    the LATE part of the freefall window, BEFORE the operator's own opening
+    shock (which is where detect_freefall ends the window). Marks the end of
+    useful pair-tracking footage.
 
-    Mounting-agnostic: which axis catches the operator turning away from the
-    pair varies by camera orientation, so this picks whichever axis deviates
-    most rather than hard-coding one. Marks the end of useful tracking footage.
+    Mounting-agnostic: which axis catches the turn-away varies by camera
+    orientation, so this uses whichever axis deviates most from its
+    established-freefall baseline. Restricting to the late window keeps a
+    mid-freefall orbit (which also swings an axis but returns) from firing.
     """
     if freefall is None:
         return None
@@ -96,15 +103,23 @@ def detect_breakoff(sig, freefall) -> Event | None:
     if any(b is None for b in baselines):
         return None
 
-    post_idxs = [i for i, t in enumerate(sig.t_s) if t > freefall.end_s]
-    if not post_idxs:
+    lo = max(freefall.start_s + ORBIT_MIN_AFTER_EXIT_S + BREAKOFF_BASELINE_S,
+             freefall.end_s - BREAKOFF_SEARCH_LATE_S)
+    idxs = _indices_in_window(sig, lo, freefall.end_s)
+    if not idxs:
         return None
-
-    for i in post_idxs:
-        deviations = [abs(axis[i] - baseline) for axis, baseline in zip(axes, baselines)]
-        max_dev = max(deviations)
+    need = max(1, int(round(BREAKOFF_SUSTAIN_S * sig.fs)))
+    run_start = None
+    for i in idxs:
+        max_dev = max(abs(axis[i] - b) for axis, b in zip(axes, baselines))
         if max_dev > BREAKOFF_AXIS_EXCURSION_G:
-            conf = round(max(0.5, min(0.99, 0.5 + (max_dev - BREAKOFF_AXIS_EXCURSION_G) * 0.3)), 3)
-            return Event(type="operator_breakoff", t_s=sig.t_s[i],
-                         source="telemetry", confidence=conf)
+            if run_start is None:
+                run_start = i
+            if i - run_start + 1 >= need:
+                dev0 = max(abs(axis[run_start] - b) for axis, b in zip(axes, baselines))
+                conf = round(max(0.5, min(0.99, 0.5 + (dev0 - BREAKOFF_AXIS_EXCURSION_G) * 0.3)), 3)
+                return Event(type="operator_breakoff", t_s=sig.t_s[run_start],
+                             source="telemetry", confidence=conf)
+        else:
+            run_start = None
     return None
