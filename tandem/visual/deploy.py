@@ -59,6 +59,77 @@ def _line_columns(path: str, t: float, tmp: str) -> float:
     return float((ridge.sum(axis=0) > band.shape[0] * COL_FRAC).sum())
 
 
+# --- drogue throw (stabilization) ---------------------------------------------
+# After exit the tandem tumbles; once the drogue is thrown the pair STABILIZES,
+# hanging under it on a line — a tall, thin, steady dark column. So the dark
+# object's vertical extent jumps to near-full and holds. This is framing-dependent
+# (needs the operator filming the drogue column from roughly below), so it fires
+# only when that steady tall column is actually present, and returns None otherwise
+# rather than guessing.
+DVX0, DVX1, DVY0, DVY1 = 0.30, 0.70, 0.08, 0.85
+DROGUE_SEARCH_S = 15.0
+DROGUE_VEXT_HIGH = 0.85     # "hanging under the drogue" gives a near-full vertical extent
+DROGUE_SUSTAIN_S = 1.5      # ...held this long (tumbling is brief and jittery)
+
+
+def _dark_vext(path: str, t: float, tmp: str) -> float:
+    """Vertical extent of the central dark object (0..1 of the crop height)."""
+    subprocess.run(["ffmpeg", "-y", "-ss", f"{max(t, 0):.2f}", "-i", path,
+                    "-frames:v", "1", "-vf", f"scale=-2:{ANALYZE_HEIGHT}", tmp],
+                   check=False, capture_output=True)
+    if not os.path.exists(tmp):
+        return 0.0
+    g = np.asarray(Image.open(tmp).convert("L"), dtype=np.float32)
+    h, w = g.shape
+    c = g[int(h * DVY0):int(h * DVY1), int(w * DVX0):int(w * DVX1)]
+    if c.size == 0:
+        return 0.0
+    dark = c < (c.mean() * 0.55)
+    ys, _ = np.where(dark)
+    if ys.size < 15:
+        return 0.0
+    return float((np.percentile(ys, 95) - np.percentile(ys, 5)) / c.shape[0])
+
+
+def detect_drogue(path: str, exit_t: float, search_s: float = DROGUE_SEARCH_S, step_s: float = 0.5):
+    """Return (drogue_t, confidence) or None.
+
+    drogue_t = onset of the first run where the dark vertical extent stays high
+    (pair hanging under the drogue) for DROGUE_SUSTAIN_S, within (exit, exit+search].
+    None when no such steady column appears (framing hides it) — the drogue
+    boundary is then left for the human.
+    """
+    lo, hi = exit_t + 1.0, exit_t + search_s
+    ts: list[float] = []
+    vs: list[float] = []
+    fd, tmp = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        t = lo
+        while t <= hi + 1e-6:
+            ts.append(t)
+            vs.append(_dark_vext(path, t, tmp))
+            t += step_s
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if not ts:
+        return None
+    sm = [(vs[max(0, i - 1)] + vs[i] + vs[min(len(vs) - 1, i + 1)]) / 3.0 for i in range(len(vs))]
+    need = max(1, int(round(DROGUE_SUSTAIN_S / step_s)))
+    run = 0
+    for i in range(len(sm)):
+        if sm[i] >= DROGUE_VEXT_HIGH:
+            run += 1
+            if run >= need:
+                start = i - need + 1
+                conf = round(min(0.7, 0.4 + (sm[start] - DROGUE_VEXT_HIGH)), 3)
+                return ts[start], conf
+        else:
+            run = 0
+    return None
+
+
 def detect_deploy(path: str, otvorot_t: float, exit_t: float = 0.0,
                   search_s: float = SEARCH_S, step_s: float = STEP_S):
     """Return (onset_t, confidence) or None.

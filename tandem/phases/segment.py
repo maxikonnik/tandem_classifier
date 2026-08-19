@@ -29,6 +29,7 @@ class Segmentation:
     events: list[Event] = field(default_factory=list)
     highlights: list[Segment] = field(default_factory=list)      # orbit (облёт) candidates
     canopy: Segment | None = None                                # canopy deploy -> break-off (visual)
+    drogue: Event | None = None                                  # drogue throw = free-fall start (visual)
     tracking_window: tuple[float, float] | None = None           # [exit, break-off | freefall end]
     degradations: list[str] = field(default_factory=list)
 
@@ -50,12 +51,19 @@ class Segmentation:
         breakoff = next((e for e in self.events if e.type == "operator_breakoff"), None)
         deploy = self.canopy.start_s if self.canopy is not None else None
         ff_end = deploy if deploy is not None else (breakoff.t_s if breakoff else None)
+        # free-fall begins at the drogue throw when we detected it, else at exit.
+        ff_start = self.drogue.t_s if self.drogue is not None else exit_e.t_s
 
-        out: list[dict] = [{"type": "отделение", "kind": "moment",
-                            "t_s": round(exit_e.t_s, 2), "source": exit_e.source}]
+        if self.drogue is not None:
+            out: list[dict] = [{"type": "отделение", "kind": "span",
+                                "start_s": round(exit_e.t_s, 2), "end_s": round(self.drogue.t_s, 2),
+                                "source": self.drogue.source, "confidence": self.drogue.confidence}]
+        else:
+            out = [{"type": "отделение", "kind": "moment",
+                    "t_s": round(exit_e.t_s, 2), "source": exit_e.source}]
         if ff_end is not None:
             out.append({"type": "свободное падение", "kind": "span",
-                        "start_s": round(exit_e.t_s, 2), "end_s": round(ff_end, 2),
+                        "start_s": round(ff_start, 2), "end_s": round(ff_end, 2),
                         "source": "telemetry"})
         if deploy is not None and breakoff is not None:
             out.append({"type": "раскрытие", "kind": "span",
@@ -79,6 +87,7 @@ class Segmentation:
             "events": [ev(e) for e in self.events],
             "highlights": [seg(h) for h in self.highlights],
             "canopy": seg(self.canopy) if self.canopy else None,
+            "drogue": ev(self.drogue) if self.drogue else None,
             "tracking_window": ([round(self.tracking_window[0], 2), round(self.tracking_window[1], 2)]
                                 if self.tracking_window else None),
             "degradations": list(self.degradations),
@@ -125,7 +134,26 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True) -> Segmentati
     out = segment_signals(sig)
     if visual:
         _add_canopy(out, path)
+        _add_drogue(out, path)
     return out
+
+
+def _add_drogue(out: "Segmentation", path: str) -> None:
+    """Add the drogue-throw boundary (free-fall start) when the pair's stabilization
+    under the drogue is visible. Visual-only and best-effort: any failure, or no
+    clear steady column, just leaves drogue unset (отделение stays a moment)."""
+    exit_event = next((e for e in out.events if e.type == "exit"), None)
+    if exit_event is None:
+        return
+    try:
+        from tandem.visual.deploy import detect_drogue
+        found = detect_drogue(path, exit_event.t_s)
+    except Exception:
+        return
+    if found is None:
+        return
+    t, conf = found
+    out.drogue = Event(type="drogue", t_s=t, source="visual", confidence=conf)
 
 
 def _add_canopy(out: "Segmentation", path: str) -> None:

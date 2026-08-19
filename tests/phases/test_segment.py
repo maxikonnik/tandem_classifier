@@ -70,3 +70,16 @@ def test_intervals_freefall_runs_to_breakoff_without_deploy():
 
 def test_intervals_empty_without_exit():
     assert Segmentation().intervals() == []
+
+
+def test_intervals_with_drogue_makes_exit_a_span_and_starts_freefall_at_drogue():
+    s = Segmentation(
+        events=[Event("exit", 38.2, "telemetry", 0.5),
+                Event("operator_breakoff", 91.6, "telemetry", 0.8)],
+        canopy=Segment("canopy", 88.8, 91.6, "visual", 0.6),
+        drogue=Event("drogue", 42.5, "visual", 0.5),
+    )
+    ivs = s.intervals()
+    assert [i["type"] for i in ivs] == ["отделение", "свободное падение", "раскрытие"]
+    assert ivs[0]["kind"] == "span" and ivs[0]["start_s"] == 38.2 and ivs[0]["end_s"] == 42.5
+    assert ivs[1]["start_s"] == 42.5 and ivs[1]["end_s"] == 88.8   # free-fall from drogue to deploy
