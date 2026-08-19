@@ -32,10 +32,13 @@ class Signals:
     gx: list[float] = field(default_factory=list)          # per-axis rate, rad/s
     gy: list[float] = field(default_factory=list)
     gz: list[float] = field(default_factory=list)
+    iso: list[float] = field(default_factory=list)         # ISO (ISOE) — high in cabin, ~100 in daylight
+    shutter: list[float] = field(default_factory=list)     # exposure time, s (SHUT) — slow in cabin, fast in daylight
     fs: float = 10.0
     has_accel: bool = False
     has_gps: bool = False
     has_gyro: bool = False
+    has_exposure: bool = False
 
 
 def _flatten(klv) -> list[float]:
@@ -172,6 +175,24 @@ def _gps_speeds(children) -> list[float] | None:
     return [sample[4] / divisor for sample in decode_numbers(gps5)]
 
 
+def _exposure_values(children) -> tuple[list[float] | None, list[float] | None]:
+    """(ISO values, shutter times in s) from one payload's ISOE/SHUT, or (None, None).
+
+    Both are raw (no SCAL). Exposure jumps at exit — leaving the dark cabin for
+    daylight drops ISO from ~500-1200 to ~100 and shutter from ~1/220 to ~1/2000 —
+    so it is an independent corroborator of the accelerometer exit event.
+    """
+    iso = shut = None
+    for c in children:
+        if c.key == "ISOE":
+            iso = c
+        elif c.key == "SHUT":
+            shut = c
+    iso_v = [s[0] for s in decode_numbers(iso)] if iso is not None else None
+    shut_v = [s[0] for s in decode_numbers(shut)] if shut is not None else None
+    return iso_v, shut_v
+
+
 def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     accel_raw: list[float] = []
     ax_raw: list[float] = []
@@ -182,9 +203,12 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     gx_raw: list[float] = []
     gy_raw: list[float] = []
     gz_raw: list[float] = []
+    iso_raw: list[float] = []
+    shut_raw: list[float] = []
     saw_accel = False
     saw_gps = False
     saw_gyro = False
+    saw_exposure = False
     for children in _stream_children(blob):
         a = _accel_magnitudes(children)
         if a is not None:
@@ -206,7 +230,15 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
         if s is not None:
             saw_gps = True
             speed_raw.extend(s)
-    sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps, has_gyro=saw_gyro)
+        iso_v, shut_v = _exposure_values(children)
+        if iso_v:
+            saw_exposure = True
+            iso_raw.extend(iso_v)
+        if shut_v:
+            saw_exposure = True
+            shut_raw.extend(shut_v)
+    sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps, has_gyro=saw_gyro,
+                  has_exposure=saw_exposure)
     # Recording duration: longer of the two streams at their nominal rates.
     accel_dur = (len(accel_raw) / 200.0) if accel_raw else 0.0
     gps_dur = (len(speed_raw) / 18.0) if speed_raw else 0.0
@@ -234,6 +266,8 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
         sig.gx = [0.0] * n_out
         sig.gy = [0.0] * n_out
         sig.gz = [0.0] * n_out
+    sig.iso = resample(iso_raw, n_out) if iso_raw else [0.0] * n_out
+    sig.shutter = resample(shut_raw, n_out) if shut_raw else [0.0] * n_out
     return sig
 
 

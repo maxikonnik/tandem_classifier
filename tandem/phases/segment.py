@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from tandem.phases.api import detect_phases
 from tandem.phases.detect import Event, Segment
+from tandem.phases.exposure import detect_exit_exposure
 from tandem.phases.motion import detect_breakoff, detect_orbit, freefall_std_ok
 from tandem.phases.signals import build_signals_from_file
 
@@ -20,6 +21,8 @@ from tandem.phases.signals import build_signals_from_file
 # and right (after). Total span stays within the ~5 s the opening can ever last.
 CANOPY_LEFT_S = 1.0
 CANOPY_RIGHT_S = 3.0
+# Accel and exposure exits should agree within this; a wider gap is flagged for review.
+EXIT_AGREE_S = 3.0
 
 
 @dataclass
@@ -55,6 +58,15 @@ def segment_signals(sig) -> Segmentation:
     res = detect_phases(sig)
     out = Segmentation(phases=list(res.phases), events=list(res.events),
                        degradations=list(res.degradations))
+
+    # Independent exit corroborator from camera exposure (daylight onset). Agreement
+    # with the accel exit raises confidence; a wide gap is an annotation-priority flag.
+    exp_exit = detect_exit_exposure(sig)
+    if exp_exit is not None:
+        out.events.append(exp_exit)
+        accel_exit = next((e for e in out.events if e.type == "exit"), None)
+        if accel_exit is not None and abs(exp_exit.t_s - accel_exit.t_s) > EXIT_AGREE_S:
+            out.degradations.append("EXIT_DISAGREEMENT")
 
     freefall = next((p for p in res.phases if p.type == "freefall"), None)
     if freefall is not None:
