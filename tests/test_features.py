@@ -1,5 +1,6 @@
 from tandem.phases.signals import Signals
-from tandem.features import signals_to_rows, write_features_csv, FEATURE_COLUMNS
+from tandem.features import (signals_to_rows, write_features_csv, FEATURE_COLUMNS,
+                             _safe_name, main)
 
 
 def _sig():
@@ -22,3 +23,13 @@ def test_write_features_csv(tmp_path):
     lines = p.read_text(encoding="utf-8").splitlines()
     assert lines[0].split(",")[0] == "t_s"
     assert len(lines) == 4   # header + 3 rows
+
+
+def test_safe_name_sanitizes_separators_and_spaces():
+    assert _safe_name("08 02\\Video\\GX012255.MP4") == "08_02__Video__GX012255.MP4"
+    assert _safe_name("a/b c.mp4") == "a__b_c.mp4"
+
+
+def test_cli_reports_when_no_videos(tmp_path, capsys):
+    assert main([str(tmp_path)]) == 1   # empty dir -> exit code 1
+    assert "no videos" in capsys.readouterr().out
