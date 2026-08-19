@@ -1,11 +1,13 @@
-"""Assemble the telemetry detectors into one segmentation of a jump recording.
+"""Assemble the detectors into one segmentation of an operator jump recording.
 
-Runs the full operator-camera telemetry pipeline and returns a single
-`Segmentation`: the physical phases, the events (exit, operator break-off),
-the orbit (облёт) highlight segments, and the useful pair-tracking window
-`[exit, break-off]` — the fragment of the jump where the operator is filming
-the tandem pair. All results carry source="telemetry"; times are
-recording-relative seconds.
+The product target is three intervals on the jump — отделение (exit), свободное
+падение (free-fall) and раскрытие (opening) — delimited by three boundaries: exit,
+the tandem's d-bag deploy, and the operator's break-off (отворот). So free-fall runs
+[exit -> d-bag deploy] and раскрытие runs [d-bag deploy -> break-off]. `Segmentation`
+carries those boundaries as events + the canopy interval, and `.intervals()` returns
+the three target intervals directly. Scene sub-segmentation inside free-fall
+(emotions, general shots, облёт) is a separate backlog task, not emitted here. Times
+are recording-relative seconds.
 """
 from __future__ import annotations
 
@@ -17,10 +19,6 @@ from tandem.phases.exposure import detect_exit_exposure
 from tandem.phases.motion import detect_breakoff, detect_orbit, freefall_std_ok
 from tandem.phases.signals import build_signals_from_file
 
-# The canopy phase brackets the fill-onset moment: this far to the left (before)
-# and right (after). Total span stays within the ~5 s the opening can ever last.
-CANOPY_LEFT_S = 1.0
-CANOPY_RIGHT_S = 3.0
 # Accel and exposure exits should agree within this; a wider gap is flagged for review.
 EXIT_AGREE_S = 3.0
 
@@ -34,6 +32,38 @@ class Segmentation:
     tracking_window: tuple[float, float] | None = None           # [exit, break-off | freefall end]
     degradations: list[str] = field(default_factory=list)
 
+    def intervals(self) -> list[dict]:
+        """The product target: the three intervals on the jump, from the detected
+        boundaries (exit, d-bag deploy, break-off).
+
+        - отделение: the exit (a moment; its extent into free-fall is not detected).
+        - свободное падение: [exit -> d-bag deploy] (falls back to break-off if the
+          deploy was not found).
+        - раскрытие: [d-bag deploy -> break-off] (only when both are present).
+
+        Scene sub-segmentation inside free-fall (emotions, general shots, облёт) is
+        a separate, backlog task and is not emitted here.
+        """
+        exit_e = next((e for e in self.events if e.type == "exit"), None)
+        if exit_e is None:
+            return []
+        breakoff = next((e for e in self.events if e.type == "operator_breakoff"), None)
+        deploy = self.canopy.start_s if self.canopy is not None else None
+        ff_end = deploy if deploy is not None else (breakoff.t_s if breakoff else None)
+
+        out: list[dict] = [{"type": "отделение", "kind": "moment",
+                            "t_s": round(exit_e.t_s, 2), "source": exit_e.source}]
+        if ff_end is not None:
+            out.append({"type": "свободное падение", "kind": "span",
+                        "start_s": round(exit_e.t_s, 2), "end_s": round(ff_end, 2),
+                        "source": "telemetry"})
+        if deploy is not None and breakoff is not None:
+            out.append({"type": "раскрытие", "kind": "span",
+                        "start_s": round(self.canopy.start_s, 2),
+                        "end_s": round(self.canopy.end_s, 2),
+                        "source": self.canopy.source, "confidence": self.canopy.confidence})
+        return out
+
     def to_dict(self) -> dict:
         def seg(s):
             return {"type": s.type, "start": round(s.start_s, 2), "end": round(s.end_s, 2),
@@ -44,6 +74,7 @@ class Segmentation:
                     "confidence": e.confidence}
 
         return {
+            "intervals": self.intervals(),
             "phases": [seg(p) for p in self.phases],
             "events": [ev(e) for e in self.events],
             "highlights": [seg(h) for h in self.highlights],
@@ -98,9 +129,11 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True) -> Segmentati
 
 
 def _add_canopy(out: "Segmentation", path: str) -> None:
-    """Add the visual canopy-deploy phase [deploy -> break-off], when a break-off
-    was found. Strictly visual (vertical stretch), so it never blocks the
-    telemetry segmentation: any failure just leaves canopy unset."""
+    """Add the раскрытие (opening) interval — from the tandem's d-bag emergence to
+    the operator's break-off. `detect_deploy` finds the d-bag moment visually; the
+    interval then runs to the break-off (отворот). Strictly visual for the start, so
+    it never blocks the telemetry segmentation: any failure just leaves canopy unset.
+    """
     breakoff = next((e for e in out.events if e.type == "operator_breakoff"), None)
     if breakoff is None:
         return
@@ -114,7 +147,8 @@ def _add_canopy(out: "Segmentation", path: str) -> None:
     if found is None:
         return
     onset_t, conf = found
-    start = max(onset_t - CANOPY_LEFT_S, exit_t)
-    end = onset_t + CANOPY_RIGHT_S
-    out.canopy = Segment(type="canopy", start_s=start, end_s=end,
+    # раскрытие spans [d-bag deploy -> break-off]; guard against a deploy detected
+    # at or after the break-off (keep at least a short interval).
+    end = max(breakoff.t_s, onset_t + 0.1)
+    out.canopy = Segment(type="canopy", start_s=onset_t, end_s=end,
                          source="visual", confidence=conf)

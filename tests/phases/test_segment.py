@@ -45,3 +45,28 @@ def test_add_canopy_noop_without_breakoff():
     out = Segmentation(events=[Event("exit", 10.0, "telemetry", 0.9)])
     _add_canopy(out, "does-not-exist.mp4")
     assert out.canopy is None
+
+
+def test_intervals_three_target_intervals():
+    s = Segmentation(
+        events=[Event("exit", 38.2, "telemetry", 0.5),
+                Event("operator_breakoff", 91.6, "telemetry", 0.8)],
+        canopy=Segment("canopy", 88.8, 91.6, "visual", 0.6),
+    )
+    ivs = s.intervals()
+    assert [i["type"] for i in ivs] == ["отделение", "свободное падение", "раскрытие"]
+    assert ivs[0]["kind"] == "moment" and ivs[0]["t_s"] == 38.2
+    assert ivs[1]["start_s"] == 38.2 and ivs[1]["end_s"] == 88.8   # free-fall ends at the deploy
+    assert ivs[2]["start_s"] == 88.8 and ivs[2]["end_s"] == 91.6   # раскрытие = deploy -> break-off
+
+
+def test_intervals_freefall_runs_to_breakoff_without_deploy():
+    s = Segmentation(events=[Event("exit", 38.2, "telemetry", 0.5),
+                             Event("operator_breakoff", 91.6, "telemetry", 0.8)])
+    ivs = s.intervals()
+    assert [i["type"] for i in ivs] == ["отделение", "свободное падение"]
+    assert ivs[1]["end_s"] == 91.6   # no deploy -> free-fall runs to break-off, no раскрытие
+
+
+def test_intervals_empty_without_exit():
+    assert Segmentation().intervals() == []
