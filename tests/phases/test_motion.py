@@ -33,33 +33,43 @@ def test_detect_orbit_finds_one_segment_spanning_the_dip():
     assert seg.end_s - seg.start_s >= 3.0
 
 
-def _freefall_with_late_swing(fs=10.0, swing_g=0.0):
-    # 60 s freefall window (axes near 0 = steady tracking orientation). `swing_g`
-    # sustains a bump on one axis (az) from t=48 s to the end of freefall — the
-    # operator turning away in the LATE part of freefall, before their own deploy.
+def _freefall_with_late_turn(fs=10.0, turn_rate=0.0):
+    # 60 s freefall window. Gyro axes carry oscillatory buffeting (net ~0). A
+    # sustained one-direction rotation of `turn_rate` rad/s on gz spans t=48..51 s
+    # — the operator turning away in the LATE window, before their own deploy
+    # (freefall end). The search window is [end-18, end-3.5] = [~42, ~56], so the
+    # turn sits inside it.
     n = int(60 * fs)
     t = [i / fs for i in range(n)]
-    ax = [0.0] * n
-    ay = [0.0] * n
-    az = [0.0] * n
-    swing_start = int(48 * fs)
-    for i in range(swing_start, n):
-        az[i] = swing_g
-    sig = Signals(t_s=t, ax=ax, ay=ay, az=az, fs=fs, has_accel=True)
+    buffet = [0.6 if (i % 2 == 0) else -0.6 for i in range(n)]  # oscillatory, net ~0
+    gx = list(buffet)
+    gy = list(buffet)
+    gz = list(buffet)
+    for i in range(int(48 * fs), int(51 * fs)):
+        gz[i] = turn_rate   # sustained one-direction rotation
+    mag = [max(abs(x), abs(y), abs(z)) for x, y, z in zip(gx, gy, gz)]
+    sig = Signals(t_s=t, gx=gx, gy=gy, gz=gz, gyro_mag=mag, fs=fs, has_gyro=True)
     freefall = Segment(type="freefall", start_s=t[0], end_s=t[-1],
                         source="telemetry", confidence=0.85)
-    return sig, freefall, t[swing_start]
+    return sig, freefall
 
 
-def test_detect_breakoff_finds_late_freefall_axis_swing():
-    sig, freefall, swing_t = _freefall_with_late_swing(swing_g=1.5)
+def test_detect_breakoff_finds_late_freefall_gyro_turn():
+    sig, freefall = _freefall_with_late_turn(turn_rate=2.0)
     event = detect_breakoff(sig, freefall)
     assert event is not None
     assert event.type == "operator_breakoff"
     assert event.source == "telemetry"
-    assert abs(event.t_s - swing_t) < 0.3
+    assert 47.5 <= event.t_s <= 51.5   # lands within the sustained turn
 
 
-def test_detect_breakoff_none_when_axes_stay_near_baseline():
-    sig, freefall, _ = _freefall_with_late_swing(swing_g=0.1)
+def test_detect_breakoff_none_without_sustained_turn():
+    # Only oscillatory buffeting (net ~0) — no sustained turn-away.
+    sig, freefall = _freefall_with_late_turn(turn_rate=0.6)
+    assert detect_breakoff(sig, freefall) is None
+
+
+def test_detect_breakoff_none_without_gyro():
+    sig, freefall = _freefall_with_late_turn(turn_rate=2.0)
+    sig.has_gyro = False
     assert detect_breakoff(sig, freefall) is None

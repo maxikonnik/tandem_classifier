@@ -16,12 +16,18 @@ from tandem.phases.detect import Event, Segment
 from tandem.phases.motion import detect_breakoff, detect_orbit, freefall_std_ok
 from tandem.phases.signals import build_signals_from_file
 
+# The canopy phase brackets the fill-onset moment: this far to the left (before)
+# and right (after). Total span stays within the ~5 s the opening can ever last.
+CANOPY_LEFT_S = 1.0
+CANOPY_RIGHT_S = 3.0
+
 
 @dataclass
 class Segmentation:
     phases: list[Segment] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     highlights: list[Segment] = field(default_factory=list)      # orbit (облёт) candidates
+    canopy: Segment | None = None                                # canopy deploy -> break-off (visual)
     tracking_window: tuple[float, float] | None = None           # [exit, break-off | freefall end]
     degradations: list[str] = field(default_factory=list)
 
@@ -38,6 +44,7 @@ class Segmentation:
             "phases": [seg(p) for p in self.phases],
             "events": [ev(e) for e in self.events],
             "highlights": [seg(h) for h in self.highlights],
+            "canopy": seg(self.canopy) if self.canopy else None,
             "tracking_window": ([round(self.tracking_window[0], 2), round(self.tracking_window[1], 2)]
                                 if self.tracking_window else None),
             "degradations": list(self.degradations),
@@ -50,8 +57,14 @@ def segment_signals(sig) -> Segmentation:
                        degradations=list(res.degradations))
 
     freefall = next((p for p in res.phases if p.type == "freefall"), None)
-    if freefall is not None and freefall_std_ok(sig, freefall):
-        out.highlights = detect_orbit(sig, freefall)
+    if freefall is not None:
+        # Orbit (облёт) reads accel_std, so keep it behind the std corroboration.
+        # Break-off and the tracking window come from the GYROSCOPE / exit and must
+        # NOT be gated on accel_std: some camera models log lower accel buffeting
+        # (mean accel_std < FREEFALL_STD_MIN) yet still show a clear gyro turn, and
+        # gating here silently dropped break-off + tracking + canopy on all of them.
+        if freefall_std_ok(sig, freefall):
+            out.highlights = detect_orbit(sig, freefall)
         breakoff = detect_breakoff(sig, freefall)
         if breakoff is not None:
             out.events.append(breakoff)
@@ -62,8 +75,34 @@ def segment_signals(sig) -> Segmentation:
     return out
 
 
-def segment_file(path: str, fs: float = 10.0) -> Segmentation | None:
+def segment_file(path: str, fs: float = 10.0, visual: bool = True) -> Segmentation | None:
     sig = build_signals_from_file(path, fs=fs)
     if sig is None:
         return None
-    return segment_signals(sig)
+    out = segment_signals(sig)
+    if visual:
+        _add_canopy(out, path)
+    return out
+
+
+def _add_canopy(out: "Segmentation", path: str) -> None:
+    """Add the visual canopy-deploy phase [deploy -> break-off], when a break-off
+    was found. Strictly visual (vertical stretch), so it never blocks the
+    telemetry segmentation: any failure just leaves canopy unset."""
+    breakoff = next((e for e in out.events if e.type == "operator_breakoff"), None)
+    if breakoff is None:
+        return
+    exit_event = next((e for e in out.events if e.type == "exit"), None)
+    exit_t = exit_event.t_s if exit_event else 0.0
+    try:
+        from tandem.visual.deploy import detect_deploy
+        found = detect_deploy(path, breakoff.t_s, exit_t=exit_t)
+    except Exception:
+        return
+    if found is None:
+        return
+    onset_t, conf = found
+    start = max(onset_t - CANOPY_LEFT_S, exit_t)
+    end = onset_t + CANOPY_RIGHT_S
+    out.canopy = Segment(type="canopy", start_s=start, end_s=end,
+                         source="visual", confidence=conf)

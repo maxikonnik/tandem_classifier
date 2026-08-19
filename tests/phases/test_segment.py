@@ -1,6 +1,6 @@
 from tandem.phases.signals import Signals
 from tandem.phases.detect import Event, Segment
-from tandem.phases.segment import Segmentation, segment_signals
+from tandem.phases.segment import Segmentation, segment_signals, _add_canopy
 
 
 def test_to_dict_shape():
@@ -25,3 +25,23 @@ def test_no_telemetry_signals_segment():
     assert out.degradations == ["NO_TELEMETRY"]
     assert out.tracking_window is None
     assert out.highlights == []
+    assert out.canopy is None
+
+
+def test_to_dict_includes_canopy():
+    s = Segmentation(canopy=Segment("canopy", 80.0, 85.0, "visual", 0.5))
+    d = s.to_dict()
+    assert d["canopy"]["type"] == "canopy"
+    assert d["canopy"]["start"] == 80.0 and d["canopy"]["end"] == 85.0
+    assert d["canopy"]["source"] == "visual"
+
+
+def test_to_dict_canopy_none_by_default():
+    assert Segmentation().to_dict()["canopy"] is None
+
+
+def test_add_canopy_noop_without_breakoff():
+    # No break-off event -> _add_canopy returns before any frame I/O.
+    out = Segmentation(events=[Event("exit", 10.0, "telemetry", 0.9)])
+    _add_canopy(out, "does-not-exist.mp4")
+    assert out.canopy is None

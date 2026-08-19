@@ -15,10 +15,15 @@ ORBIT_STD_MAX = 0.18     # an orbit dip's accel_std stays below this
 ORBIT_MIN_DURATION_S = 3.0
 ORBIT_MIN_AFTER_EXIT_S = 15.0  # skip the freefall-onset settling (|a| rising smoothly = low std,
                                # but not an orbit); a real облёт is a low-std dip in established freefall
-BREAKOFF_AXIS_EXCURSION_G = 0.8  # per-axis deviation from freefall baseline that flags break-off
-BREAKOFF_BASELINE_S = 5.0        # window of established freefall used to compute each axis's baseline
-BREAKOFF_SEARCH_LATE_S = 20.0    # the turn-away precedes the operator's deploy (=freefall end); search the last N s
-BREAKOFF_SUSTAIN_S = 1.0         # the excursion must be sustained (not a transient buffeting spike)
+# Operator break-off (отворот): a sustained body rotation (turn-away), seen far
+# more cleanly on the GYROSCOPE than on linear accel. It is a net rotation in one
+# direction, unlike free-fall buffeting (oscillatory, ~zero net). It precedes the
+# operator's own canopy deploy (= where detect_freefall ends the window), so we
+# search the late window but stop short of the deploy's own rotation spike.
+BREAKOFF_NET_WINDOW_S = 1.5      # window for the signed (net) rotation = sustained turn
+BREAKOFF_MIN_NET = 0.8          # rad/s; a real turn-away sustains at least this net rate
+BREAKOFF_SEARCH_LATE_S = 18.0   # search starts this far before the deploy
+BREAKOFF_END_MARGIN_S = 3.5     # ...and stops this short of it, to skip the deploy rotation
 
 
 def _indices_in_window(sig, start_s, end_s):
@@ -72,54 +77,46 @@ def _emit_if_long_enough(sig, start_idx, end_idx, segments):
                                  source="telemetry", confidence=confidence))
 
 
-def _axis_baseline(sig, values, freefall):
-    """Mean of `values` over a stable window in ESTABLISHED freefall (after the
-    onset settling, before any late turn-away) — the tracking orientation."""
-    lo = freefall.start_s + ORBIT_MIN_AFTER_EXIT_S
-    hi = min(lo + BREAKOFF_BASELINE_S, freefall.end_s)
-    idxs = _indices_in_window(sig, lo, hi)
-    if not idxs:
-        return None
-    return sum(values[i] for i in idxs) / len(idxs)
+def _rolling_signed_mean(values, half):
+    """Signed rolling mean over a centered window — a one-direction (net) rotation
+    survives; oscillatory buffeting averages toward zero."""
+    n = len(values)
+    out = [0.0] * n
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        window = values[lo:hi]
+        out[i] = sum(window) / len(window)
+    return out
 
 
 def detect_breakoff(sig, freefall) -> Event | None:
-    """The operator turning away from the pair — a SUSTAINED axis excursion in
-    the LATE part of the freefall window, BEFORE the operator's own opening
-    shock (which is where detect_freefall ends the window). Marks the end of
-    useful pair-tracking footage.
+    """Operator break-off (отворот): the sustained turn-away that ends useful
+    pair-tracking, detected from the GYROSCOPE.
 
-    Mounting-agnostic: which axis catches the turn-away varies by camera
-    orientation, so this uses whichever axis deviates most from its
-    established-freefall baseline. Restricting to the late window keeps a
-    mid-freefall orbit (which also swings an axis but returns) from firing.
+    The turn-away is a net rotation in one direction; free-fall buffeting is
+    oscillatory (~zero net). So we take each gyro axis's signed rolling mean and
+    find where its magnitude peaks in the LATE window — after established freefall,
+    but stopping short of the operator's own deploy (freefall end), whose rotation
+    spike would otherwise dominate. Mounting-agnostic: whichever axis turns most.
     """
-    if freefall is None:
+    if freefall is None or not sig.has_gyro or not sig.gx:
         return None
-    axes = [sig.ax, sig.ay, sig.az]
-    if not any(axes):
-        return None
-    baselines = [_axis_baseline(sig, axis, freefall) for axis in axes]
-    if any(b is None for b in baselines):
-        return None
+    half = max(1, int(round(BREAKOFF_NET_WINDOW_S * sig.fs / 2)))
+    nets = [_rolling_signed_mean(axis, half) for axis in (sig.gx, sig.gy, sig.gz)]
 
-    lo = max(freefall.start_s + ORBIT_MIN_AFTER_EXIT_S + BREAKOFF_BASELINE_S,
-             freefall.end_s - BREAKOFF_SEARCH_LATE_S)
-    idxs = _indices_in_window(sig, lo, freefall.end_s)
+    lo = freefall.end_s - BREAKOFF_SEARCH_LATE_S
+    hi = freefall.end_s - BREAKOFF_END_MARGIN_S
+    idxs = _indices_in_window(sig, lo, hi)
     if not idxs:
         return None
-    need = max(1, int(round(BREAKOFF_SUSTAIN_S * sig.fs)))
-    run_start = None
+    best_i, best = None, 0.0
     for i in idxs:
-        max_dev = max(abs(axis[i] - b) for axis, b in zip(axes, baselines))
-        if max_dev > BREAKOFF_AXIS_EXCURSION_G:
-            if run_start is None:
-                run_start = i
-            if i - run_start + 1 >= need:
-                dev0 = max(abs(axis[run_start] - b) for axis, b in zip(axes, baselines))
-                conf = round(max(0.5, min(0.99, 0.5 + (dev0 - BREAKOFF_AXIS_EXCURSION_G) * 0.3)), 3)
-                return Event(type="operator_breakoff", t_s=sig.t_s[run_start],
-                             source="telemetry", confidence=conf)
-        else:
-            run_start = None
-    return None
+        turn = max(abs(nets[0][i]), abs(nets[1][i]), abs(nets[2][i]))
+        if turn > best:
+            best, best_i = turn, i
+    if best_i is None or best < BREAKOFF_MIN_NET:
+        return None
+    conf = round(max(0.5, min(0.95, 0.5 + (best - BREAKOFF_MIN_NET) * 0.25)), 3)
+    return Event(type="operator_breakoff", t_s=sig.t_s[best_i],
+                 source="telemetry", confidence=conf)

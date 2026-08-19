@@ -28,9 +28,14 @@ class Signals:
     ay: list[float] = field(default_factory=list)
     az: list[float] = field(default_factory=list)
     accel_std: list[float] = field(default_factory=list)
+    gyro_mag: list[float] = field(default_factory=list)   # |angular velocity|, rad/s
+    gx: list[float] = field(default_factory=list)          # per-axis rate, rad/s
+    gy: list[float] = field(default_factory=list)
+    gz: list[float] = field(default_factory=list)
     fs: float = 10.0
     has_accel: bool = False
     has_gps: bool = False
+    has_gyro: bool = False
 
 
 def _flatten(klv) -> list[float]:
@@ -118,6 +123,36 @@ def _accel_magnitudes(children) -> tuple[list[float], list[float], list[float], 
     return mags, ax, ay, az
 
 
+def _gyro_rates(children) -> tuple[list[float], list[float], list[float], list[float]] | None:
+    """Return (|w| in rad/s, gx, gy, gz in rad/s) for one GYRO payload, or None.
+
+    The operator break-off (отворот) is a sustained body rotation, so angular
+    velocity separates it from free-fall buffeting far better than linear accel.
+    """
+    scal = None
+    gyro = None
+    for c in children:
+        if c.key == "SCAL":
+            scal = _flatten(c)
+        elif c.key == "GYRO":
+            gyro = c
+    if gyro is None:
+        return None
+    divisor = float(scal[0]) if (scal and scal[0]) else 1.0
+    mags: list[float] = []
+    gx: list[float] = []
+    gy: list[float] = []
+    gz: list[float] = []
+    for sample in decode_numbers(gyro):
+        corrected = [v / divisor for v in sample]
+        if len(corrected) >= 3:
+            gx.append(corrected[0])
+            gy.append(corrected[1])
+            gz.append(corrected[2])
+            mags.append(math.sqrt(sum(v ** 2 for v in corrected[:3])))
+    return mags, gx, gy, gz
+
+
 def _gps_speeds(children) -> list[float] | None:
     scal = None
     gps5 = None
@@ -143,8 +178,13 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     ay_raw: list[float] = []
     az_raw: list[float] = []
     speed_raw: list[float] = []
+    gmag_raw: list[float] = []
+    gx_raw: list[float] = []
+    gy_raw: list[float] = []
+    gz_raw: list[float] = []
     saw_accel = False
     saw_gps = False
+    saw_gyro = False
     for children in _stream_children(blob):
         a = _accel_magnitudes(children)
         if a is not None:
@@ -154,11 +194,19 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
             ax_raw.extend(ax)
             ay_raw.extend(ay)
             az_raw.extend(az)
+        g = _gyro_rates(children)
+        if g is not None:
+            saw_gyro = True
+            gmag, gx, gy, gz = g
+            gmag_raw.extend(gmag)
+            gx_raw.extend(gx)
+            gy_raw.extend(gy)
+            gz_raw.extend(gz)
         s = _gps_speeds(children)
         if s is not None:
             saw_gps = True
             speed_raw.extend(s)
-    sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps)
+    sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps, has_gyro=saw_gyro)
     # Recording duration: longer of the two streams at their nominal rates.
     accel_dur = (len(accel_raw) / 200.0) if accel_raw else 0.0
     gps_dur = (len(speed_raw) / 18.0) if speed_raw else 0.0
@@ -176,6 +224,16 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     # accel_std is in g (oscillation amplitude): the orbit/freefall thresholds are
     # calibrated in g against real footage, so std must be on |a|/G, not the m/s^2 magnitude.
     sig.accel_std = rolling_std([a / G for a in sig.accel_mag], round(STD_WINDOW_S * fs))
+    if gmag_raw:
+        sig.gyro_mag = resample(gmag_raw, n_out)
+        sig.gx = resample(gx_raw, n_out)
+        sig.gy = resample(gy_raw, n_out)
+        sig.gz = resample(gz_raw, n_out)
+    else:
+        sig.gyro_mag = [0.0] * n_out
+        sig.gx = [0.0] * n_out
+        sig.gy = [0.0] * n_out
+        sig.gz = [0.0] * n_out
     return sig
 
 
