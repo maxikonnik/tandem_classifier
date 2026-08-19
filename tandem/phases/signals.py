@@ -9,6 +9,7 @@ is a later refinement; seconds-scale phase boundaries do not need it.
 from __future__ import annotations
 
 import math
+import struct
 from dataclasses import dataclass, field
 
 from tandem.recon.gpmf import decode_numbers, iter_klv, walk
@@ -34,11 +35,16 @@ class Signals:
     gz: list[float] = field(default_factory=list)
     iso: list[float] = field(default_factory=list)         # ISO (ISOE) — high in cabin, ~100 in daylight
     shutter: list[float] = field(default_factory=list)     # exposure time, s (SHUT) — slow in cabin, fast in daylight
+    face_count: list[float] = field(default_factory=list)  # faces detected (FACE) — pair close = interview/exit/canopy
+    smile: list[float] = field(default_factory=list)       # max smile %, 0..100 (0 when no face)
+    blink: list[float] = field(default_factory=list)       # max blink %, 0..100
+    face_area: list[float] = field(default_factory=list)   # max face bbox area, fraction of frame (close-up = large)
     fs: float = 10.0
     has_accel: bool = False
     has_gps: bool = False
     has_gyro: bool = False
     has_exposure: bool = False
+    has_face: bool = False
 
 
 def _flatten(klv) -> list[float]:
@@ -193,6 +199,34 @@ def _exposure_values(children) -> tuple[list[float] | None, list[float] | None]:
     return iso_v, shut_v
 
 
+# FACE payload is a compound type "BBSSSSSBB" (14 bytes/face on HERO10/11):
+# version(4), confidence, id, bbox x, y, w, h, blink %, smile %. Faces are detected
+# when the pair is close (cabin / exit / under canopy), so FACE mainly serves the
+# interview and passenger-reaction scenes, not mid-free-fall (pair too distant).
+_FACE_STRUCT = ">BBHHHHHBB"
+
+
+def _face_values(children):
+    """Per-payload FACE aggregate (n_faces, max_smile, max_blink, max_area) or None."""
+    face = None
+    for c in children:
+        if c.key == "FACE":
+            face = c
+    if face is None:
+        return None
+    n = face.repeat
+    smile = blink = area = 0.0
+    if face.sample_size == 14:
+        for i in range(n):
+            rec = face.payload[i * 14:(i + 1) * 14]
+            if len(rec) == 14:
+                v = struct.unpack(_FACE_STRUCT, rec)
+                blink = max(blink, float(v[7]))
+                smile = max(smile, float(v[8]))
+                area = max(area, (v[5] * v[6]) / (65535.0 ** 2))
+    return float(n), smile, blink, area
+
+
 def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     accel_raw: list[float] = []
     ax_raw: list[float] = []
@@ -205,10 +239,15 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     gz_raw: list[float] = []
     iso_raw: list[float] = []
     shut_raw: list[float] = []
+    fc_raw: list[float] = []
+    smile_raw: list[float] = []
+    blink_raw: list[float] = []
+    area_raw: list[float] = []
     saw_accel = False
     saw_gps = False
     saw_gyro = False
     saw_exposure = False
+    saw_face = False
     for children in _stream_children(blob):
         a = _accel_magnitudes(children)
         if a is not None:
@@ -237,8 +276,15 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
         if shut_v:
             saw_exposure = True
             shut_raw.extend(shut_v)
+        fv = _face_values(children)
+        if fv is not None:
+            saw_face = True
+            fc_raw.append(fv[0])
+            smile_raw.append(fv[1])
+            blink_raw.append(fv[2])
+            area_raw.append(fv[3])
     sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps, has_gyro=saw_gyro,
-                  has_exposure=saw_exposure)
+                  has_exposure=saw_exposure, has_face=saw_face)
     # Recording duration: longer of the two streams at their nominal rates.
     accel_dur = (len(accel_raw) / 200.0) if accel_raw else 0.0
     gps_dur = (len(speed_raw) / 18.0) if speed_raw else 0.0
@@ -268,6 +314,10 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
         sig.gz = [0.0] * n_out
     sig.iso = resample(iso_raw, n_out) if iso_raw else [0.0] * n_out
     sig.shutter = resample(shut_raw, n_out) if shut_raw else [0.0] * n_out
+    sig.face_count = resample(fc_raw, n_out) if fc_raw else [0.0] * n_out
+    sig.smile = resample(smile_raw, n_out) if smile_raw else [0.0] * n_out
+    sig.blink = resample(blink_raw, n_out) if blink_raw else [0.0] * n_out
+    sig.face_area = resample(area_raw, n_out) if area_raw else [0.0] * n_out
     return sig
 
 
