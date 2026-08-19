@@ -72,6 +72,24 @@ def test_intervals_empty_without_exit():
     assert Segmentation().intervals() == []
 
 
+def test_edit_intervals_apply_cabin_lead_and_raskrytie_trim():
+    s = Segmentation(
+        events=[Event("exit", 38.2, "telemetry", 0.5),
+                Event("operator_breakoff", 91.6, "telemetry", 0.8)],
+        canopy=Segment("canopy", 88.8, 91.6, "visual", 0.6),
+        drogue=Event("drogue", 42.5, "visual", 0.5),
+    )
+    ivs = s.edit_intervals(cabin_lead=4.0, raskrytie_trim=1.5)
+    otd, ff, rask = ivs
+    assert otd["start_s"] == 34.2 and otd["end_s"] == 42.5   # opens in the cabin, 4s before exit
+    assert rask["start_s"] == 88.8 and rask["end_s"] == 90.1  # trimmed 1.5s before break-off (91.6)
+
+
+def test_edit_intervals_cabin_lead_clamps_at_zero():
+    s = Segmentation(events=[Event("exit", 2.0, "telemetry", 0.5)])
+    assert s.edit_intervals()[0]["start_s"] == 0.0
+
+
 def test_intervals_with_drogue_makes_exit_a_span_and_starts_freefall_at_drogue():
     s = Segmentation(
         events=[Event("exit", 38.2, "telemetry", 0.5),

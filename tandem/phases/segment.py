@@ -22,6 +22,13 @@ from tandem.phases.signals import build_signals_from_file
 # Accel and exposure exits should agree within this; a wider gap is flagged for review.
 EXIT_AGREE_S = 3.0
 
+# Empirical editing offsets for the product cut (tunable against the final videos):
+# the отделение clip opens CABIN_LEAD_S before the detected exit so it starts IN THE
+# CABIN, and раскрытие ends RASKRYTIE_TRIM_S before the break-off so the operator's
+# turn-away (отворот) does not land in the final video.
+CABIN_LEAD_S = 4.0
+RASKRYTIE_TRIM_S = 1.5
+
 
 @dataclass
 class Segmentation:
@@ -72,6 +79,37 @@ class Segmentation:
                         "source": self.canopy.source, "confidence": self.canopy.confidence})
         return out
 
+    def edit_intervals(self, cabin_lead: float = CABIN_LEAD_S,
+                       raskrytie_trim: float = RASKRYTIE_TRIM_S) -> list[dict]:
+        """The product cut: the three intervals with empirical editing offsets applied.
+
+        Unlike `intervals()` (the raw detected boundaries, used for annotation and
+        evaluation), this shifts times for the final video: отделение opens
+        `cabin_lead` s before exit (so it starts in the cabin) and раскрытие ends
+        `raskrytie_trim` s before the break-off (so the отворот is trimmed out). The
+        offsets are tunable per the editors' taste.
+        """
+        exit_e = next((e for e in self.events if e.type == "exit"), None)
+        if exit_e is None:
+            return []
+        breakoff = next((e for e in self.events if e.type == "operator_breakoff"), None)
+        deploy = self.canopy.start_s if self.canopy is not None else None
+        ff_end = deploy if deploy is not None else (breakoff.t_s if breakoff else None)
+        ff_start = self.drogue.t_s if self.drogue is not None else exit_e.t_s
+
+        out = [{"type": "отделение", "kind": "span",
+                "start_s": round(max(0.0, exit_e.t_s - cabin_lead), 2),
+                "end_s": round(ff_start, 2)}]
+        if ff_end is not None:
+            out.append({"type": "свободное падение", "kind": "span",
+                        "start_s": round(ff_start, 2), "end_s": round(ff_end, 2)})
+        if deploy is not None and breakoff is not None:
+            r_end = max(deploy + 0.1, self.canopy.end_s - raskrytie_trim)
+            out.append({"type": "раскрытие", "kind": "span",
+                        "start_s": round(deploy, 2), "end_s": round(r_end, 2),
+                        "confidence": self.canopy.confidence})
+        return out
+
     def to_dict(self) -> dict:
         def seg(s):
             return {"type": s.type, "start": round(s.start_s, 2), "end": round(s.end_s, 2),
@@ -83,6 +121,7 @@ class Segmentation:
 
         return {
             "intervals": self.intervals(),
+            "edit_intervals": self.edit_intervals(),
             "phases": [seg(p) for p in self.phases],
             "events": [ev(e) for e in self.events],
             "highlights": [seg(h) for h in self.highlights],
