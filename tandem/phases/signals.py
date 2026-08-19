@@ -39,12 +39,16 @@ class Signals:
     smile: list[float] = field(default_factory=list)       # max smile %, 0..100 (0 when no face)
     blink: list[float] = field(default_factory=list)       # max blink %, 0..100
     face_area: list[float] = field(default_factory=list)   # max face bbox area, fraction of frame (close-up = large)
+    audio_level: list[float] = field(default_factory=list) # AALP RMS audio level, dBFS — drops under canopy (wind falls)
+    scene_indoor: list[float] = field(default_factory=list)  # SCEN INDO probability — high in the cabin, drops at exit
     fs: float = 10.0
     has_accel: bool = False
     has_gps: bool = False
     has_gyro: bool = False
     has_exposure: bool = False
     has_face: bool = False
+    has_audio: bool = False
+    has_scene: bool = False
 
 
 def _flatten(klv) -> list[float]:
@@ -227,6 +231,28 @@ def _face_values(children):
     return float(n), smile, blink, area
 
 
+def _audio_level(children) -> float | None:
+    """Mean RMS audio level (dBFS) for one AALP payload, ignoring -128 (silence/invalid)."""
+    aalp = next((c for c in children if c.key == "AALP"), None)
+    if aalp is None:
+        return None
+    vals = [v[0] for v in decode_numbers(aalp) if v and v[0] > -128]
+    return (sum(vals) / len(vals)) if vals else None
+
+
+def _scene_indoor(children) -> float | None:
+    """SCEN indoor (INDO) probability — a compound "Ff" of (FourCC class, float prob)."""
+    scen = next((c for c in children if c.key == "SCEN"), None)
+    if scen is None or scen.sample_size != 8:
+        return None
+    indoor = 0.0
+    for i in range(scen.repeat):
+        rec = scen.payload[i * 8:(i + 1) * 8]
+        if len(rec) == 8 and rec[:4] == b"INDO":
+            indoor = struct.unpack(">f", rec[4:8])[0]
+    return indoor
+
+
 def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     accel_raw: list[float] = []
     ax_raw: list[float] = []
@@ -243,11 +269,15 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     smile_raw: list[float] = []
     blink_raw: list[float] = []
     area_raw: list[float] = []
+    audio_raw: list[float] = []
+    scene_raw: list[float] = []
     saw_accel = False
     saw_gps = False
     saw_gyro = False
     saw_exposure = False
     saw_face = False
+    saw_audio = False
+    saw_scene = False
     for children in _stream_children(blob):
         a = _accel_magnitudes(children)
         if a is not None:
@@ -283,8 +313,17 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
             smile_raw.append(fv[1])
             blink_raw.append(fv[2])
             area_raw.append(fv[3])
+        av = _audio_level(children)
+        if av is not None:
+            saw_audio = True
+            audio_raw.append(av)
+        sc = _scene_indoor(children)
+        if sc is not None:
+            saw_scene = True
+            scene_raw.append(sc)
     sig = Signals(fs=fs, has_accel=saw_accel, has_gps=saw_gps, has_gyro=saw_gyro,
-                  has_exposure=saw_exposure, has_face=saw_face)
+                  has_exposure=saw_exposure, has_face=saw_face,
+                  has_audio=saw_audio, has_scene=saw_scene)
     # Recording duration: longer of the two streams at their nominal rates.
     accel_dur = (len(accel_raw) / 200.0) if accel_raw else 0.0
     gps_dur = (len(speed_raw) / 18.0) if speed_raw else 0.0
@@ -318,6 +357,8 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     sig.smile = resample(smile_raw, n_out) if smile_raw else [0.0] * n_out
     sig.blink = resample(blink_raw, n_out) if blink_raw else [0.0] * n_out
     sig.face_area = resample(area_raw, n_out) if area_raw else [0.0] * n_out
+    sig.audio_level = resample(audio_raw, n_out) if audio_raw else [0.0] * n_out
+    sig.scene_indoor = resample(scene_raw, n_out) if scene_raw else [0.0] * n_out
     return sig
 
 
