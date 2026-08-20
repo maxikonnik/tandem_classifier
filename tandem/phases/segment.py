@@ -166,7 +166,8 @@ def segment_signals(sig) -> Segmentation:
     return out
 
 
-def segment_file(path: str, fs: float = 10.0, visual: bool = True) -> Segmentation | None:
+def segment_file(path: str, fs: float = 10.0, visual: bool = True,
+                 probe: bool = False) -> Segmentation | None:
     sig = build_signals_from_file(path, fs=fs)
     if sig is None:
         return None
@@ -174,7 +175,35 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True) -> Segmentati
     if visual:
         _add_canopy(out, path)
         _add_drogue(out, path)
+    if probe:
+        _apply_probe(out, path)
     return out
+
+
+def _apply_probe(out: "Segmentation", path: str) -> None:
+    """Override the drogue and canopy (deploy) boundaries with the frozen-backbone
+    probe — deploy 91 % / drogue 85 % vs the heuristics' 59 % / 16 % (leave-one-
+    operator-out, 97 jumps). Its window is [exit, break-off], so it needs both.
+    Best-effort: if torch/transformers or the probe weights are missing it does
+    nothing and the heuristic boundaries stand."""
+    exit_e = next((e for e in out.events if e.type == "exit"), None)
+    breakoff = next((e for e in out.events if e.type == "operator_breakoff"), None)
+    if exit_e is None or breakoff is None:
+        return
+    try:
+        from tandem.visual.probe import predict_boundaries
+        pred = predict_boundaries(path, exit_e.t_s, breakoff.t_s)
+    except Exception:
+        return
+    if not pred:
+        return
+    if pred.get("drogue") is not None:
+        out.drogue = Event(type="drogue", t_s=pred["drogue"],
+                           source="visual-probe", confidence=0.85)
+    if pred.get("deploy") is not None:
+        end = max(pred["deploy"] + 0.1, breakoff.t_s)
+        out.canopy = Segment(type="canopy", start_s=pred["deploy"], end_s=end,
+                             source="visual-probe", confidence=0.91)
 
 
 def _add_drogue(out: "Segmentation", path: str) -> None:
