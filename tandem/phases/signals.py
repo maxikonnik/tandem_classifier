@@ -182,7 +182,14 @@ def _gps_speeds(children) -> list[float] | None:
         divisor = float(scal[0])
     else:
         divisor = 1.0
-    return [sample[4] / divisor for sample in decode_numbers(gps5)]
+    try:
+        return [sample[4] / divisor for sample in decode_numbers(gps5)]
+    except (ValueError, struct.error):
+        # A corrupt GPS5 KLV (e.g. a garbage type byte from a misaligned stream)
+        # must not sink the whole recording — GPS is only a fallback for the
+        # freefall/descent cues, which the accelerometer also carries. Skip this
+        # payload's GPS samples and let ACCL/GYRO segmentation stand.
+        return None
 
 
 def _exposure_values(children) -> tuple[list[float] | None, list[float] | None]:
@@ -198,8 +205,11 @@ def _exposure_values(children) -> tuple[list[float] | None, list[float] | None]:
             iso = c
         elif c.key == "SHUT":
             shut = c
-    iso_v = [s[0] for s in decode_numbers(iso)] if iso is not None else None
-    shut_v = [s[0] for s in decode_numbers(shut)] if shut is not None else None
+    try:
+        iso_v = [s[0] for s in decode_numbers(iso)] if iso is not None else None
+        shut_v = [s[0] for s in decode_numbers(shut)] if shut is not None else None
+    except (ValueError, struct.error):
+        return None, None  # corrupt exposure KLV: drop this payload, keep the file
     return iso_v, shut_v
 
 
@@ -236,7 +246,10 @@ def _audio_level(children) -> float | None:
     aalp = next((c for c in children if c.key == "AALP"), None)
     if aalp is None:
         return None
-    vals = [v[0] for v in decode_numbers(aalp) if v and v[0] > -128]
+    try:
+        vals = [v[0] for v in decode_numbers(aalp) if v and v[0] > -128]
+    except (ValueError, struct.error):
+        return None  # corrupt audio-level KLV: drop this payload, keep the file
     return (sum(vals) / len(vals)) if vals else None
 
 

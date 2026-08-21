@@ -72,6 +72,27 @@ def test_build_signals_accel_only_pads_speed_with_zeros():
     assert all(v == 0.0 for v in sig.speed_3d)
 
 
+def test_build_signals_survives_corrupt_gps5():
+    # A GPS5 KLV with a garbage type byte (0xFE 'þ', seen on misaligned streams)
+    # must not sink the whole recording: ACCL still comes through, GPS is dropped.
+    accl_scal = _klv(b"SCAL", b"s", 2, 1, struct.pack(">h", 100))
+    accl_payload = struct.pack(">3h", 300, 400, 0) + struct.pack(">3h", 600, 800, 0)
+    accl = _klv(b"ACCL", b"s", 6, 2, accl_payload)
+    strm_accl = _klv(b"STRM", b"\x00", 1, len(accl_scal + accl), accl_scal + accl)
+
+    gps_scal = _klv(b"SCAL", b"l", 4, 5, struct.pack(">5i", 10000000, 10000000, 1000, 1000, 1000))
+    bad_gps5 = _klv(b"GPS5", b"\xfe", 20, 2, b"\x00" * 40)  # non-numeric type -> would raise
+    strm_gps = _klv(b"STRM", b"\x00", 1, len(gps_scal + bad_gps5), gps_scal + bad_gps5)
+
+    devc = _klv(b"DEVC", b"\x00", 1, len(strm_accl + strm_gps), strm_accl + strm_gps)
+
+    sig = build_signals(devc, fs=10.0)          # must not raise
+    assert sig.has_accel is True
+    assert sig.has_gps is False                 # corrupt GPS payload skipped
+    assert abs(sig.accel_mag[0] - 5.0) < 1e-6
+    assert len(sig.accel_mag) == len(sig.speed_3d) == len(sig.t_s)
+
+
 def test_build_signals_accumulates_across_payloads():
     # Two DEVC payloads, each a STRM with SCAL+ACCL. Payload 1 has a deep dip.
     def strm_accl(vals):  # vals: list of (x,y,z) int16 tuples
