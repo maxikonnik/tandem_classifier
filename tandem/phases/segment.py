@@ -30,6 +30,20 @@ EXIT_AGREE_S = 3.0
 # ship a confidently-wrong boundary; 15 s sits safely under the real minimum.
 FREEFALL_MIN_S = 15.0
 
+# Physical bounds on the exit -> deploy span (отделение + свободное падение, i.e. the
+# whole descent from leaving the aircraft to the tandem's d-bag). Across the 128
+# hand-labelled jumps this span is 28-57 s (median 49); 18-60 s is a safe envelope
+# that admits low and high exits yet rejects a deploy landed impossibly close to the
+# exit (a collapse) or far past it (a frame grabbed under the open canopy).
+EXIT_DEPLOY_MIN_S = 18.0
+EXIT_DEPLOY_MAX_S = 60.0
+
+
+def _deploy_span_ok(exit_t: float, deploy_t: float) -> bool:
+    """Whether a deploy time is physically plausible given the exit: the exit ->
+    deploy span must fall within [EXIT_DEPLOY_MIN_S, EXIT_DEPLOY_MAX_S]."""
+    return EXIT_DEPLOY_MIN_S <= (deploy_t - exit_t) <= EXIT_DEPLOY_MAX_S
+
 # Empirical editing offsets for the product cut (tunable against the final videos):
 # the отделение clip opens CABIN_LEAD_S before the detected exit so it starts IN THE
 # CABIN, and раскрытие ends RASKRYTIE_TRIM_S before the break-off so the operator's
@@ -219,6 +233,11 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
         out.drogue = Event(type="drogue", t_s=drogue_t,
                            source="visual-probe", confidence=0.85)
     if deploy_t is not None:
+        if not _deploy_span_ok(exit_e.t_s, deploy_t):
+            # deploy landed outside the physical exit -> deploy window: reject it
+            # and flag rather than ship a canopy at the wrong depth of the jump.
+            out.degradations.append("DEPLOY_SPAN_IMPLAUSIBLE")
+            return
         end = max(deploy_t + 0.1, breakoff.t_s)
         out.canopy = Segment(type="canopy", start_s=deploy_t, end_s=end,
                              source="visual-probe", confidence=0.91)
@@ -261,6 +280,12 @@ def _add_canopy(out: "Segmentation", path: str) -> None:
     if found is None:
         return
     onset_t, conf = found
+    # Reject a d-bag detected outside the physical exit -> deploy window (only when
+    # we have an exit to measure from); a bright-line burst can otherwise fire on a
+    # cabin door or an already-open canopy far from the real deploy.
+    if exit_event is not None and not _deploy_span_ok(exit_t, onset_t):
+        out.degradations.append("DEPLOY_SPAN_IMPLAUSIBLE")
+        return
     # раскрытие spans [d-bag deploy -> break-off]; guard against a deploy detected
     # at or after the break-off (keep at least a short interval).
     end = max(breakoff.t_s, onset_t + 0.1)

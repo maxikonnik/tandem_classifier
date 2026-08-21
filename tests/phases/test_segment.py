@@ -1,7 +1,9 @@
 import tandem.visual.probe as probe_mod
+import tandem.visual.deploy as deploy_mod
 from tandem.phases.signals import Signals
 from tandem.phases.detect import Event, Segment
-from tandem.phases.segment import Segmentation, segment_signals, _add_canopy, _apply_probe
+from tandem.phases.segment import (Segmentation, segment_signals, _add_canopy,
+                                   _apply_probe, _deploy_span_ok)
 
 
 def _jump_with_exit_breakoff():
@@ -27,6 +29,52 @@ def test_apply_probe_rejects_collapsed_freefall(monkeypatch):
     _apply_probe(out, "dummy.mp4")
     assert out.drogue is None and out.canopy is None
     assert "PROBE_FREEFALL_IMPLAUSIBLE" in out.degradations
+
+
+def test_deploy_span_ok_bounds():
+    # exit at 40: deploy plausible only within [40+18, 40+60] = [58, 100].
+    assert _deploy_span_ok(40.0, 90.0) is True
+    assert _deploy_span_ok(40.0, 56.0) is False    # 16 s: too close to exit
+    assert _deploy_span_ok(40.0, 101.0) is False   # 61 s: too far past exit
+
+
+def test_apply_probe_rejects_deploy_past_exit_window(monkeypatch):
+    # drogue plausible, deploy 61 s after exit (>60) -> keep drogue, reject deploy.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 42.0, "deploy": 99.0})
+    out = _jump_with_exit_breakoff()          # exit 38, breakoff 95
+    _apply_probe(out, "dummy.mp4")
+    assert out.drogue is not None and out.drogue.t_s == 42.0
+    assert out.canopy is None
+    assert "DEPLOY_SPAN_IMPLAUSIBLE" in out.degradations
+
+
+def test_apply_probe_rejects_deploy_too_close_to_exit(monkeypatch):
+    # free-fall span ok (deploy-drogue=15) but exit->deploy=17 (<18) -> reject deploy.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 40.0, "deploy": 55.0})
+    out = _jump_with_exit_breakoff()
+    _apply_probe(out, "dummy.mp4")
+    assert out.canopy is None
+    assert "DEPLOY_SPAN_IMPLAUSIBLE" in out.degradations
+
+
+def test_add_canopy_rejects_deploy_outside_exit_window(monkeypatch):
+    monkeypatch.setattr(deploy_mod, "detect_deploy",
+                        lambda *a, **k: (99.0, 0.5))   # 61 s after exit
+    out = _jump_with_exit_breakoff()
+    _add_canopy(out, "dummy.mp4")
+    assert out.canopy is None
+    assert "DEPLOY_SPAN_IMPLAUSIBLE" in out.degradations
+
+
+def test_add_canopy_accepts_deploy_inside_exit_window(monkeypatch):
+    monkeypatch.setattr(deploy_mod, "detect_deploy",
+                        lambda *a, **k: (84.0, 0.5))   # 46 s after exit
+    out = _jump_with_exit_breakoff()
+    _add_canopy(out, "dummy.mp4")
+    assert out.canopy is not None and out.canopy.start_s == 84.0
+    assert "DEPLOY_SPAN_IMPLAUSIBLE" not in out.degradations
 
 
 def test_to_dict_shape():
