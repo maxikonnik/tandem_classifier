@@ -22,6 +22,14 @@ from tandem.phases.signals import build_signals_from_file
 # Accel and exposure exits should agree within this; a wider gap is flagged for review.
 EXIT_AGREE_S = 3.0
 
+# Physical floor on the drogue -> deploy span (свободное падение). A drogue-slowed
+# tandem falls for tens of seconds before the d-bag; in the 97 hand-labelled jumps
+# this span is never below 23 s (median 44 s). The frozen probe, run on unfamiliar
+# operators/cameras, sometimes collapses the two boundaries onto one frame — a
+# physically impossible near-zero free-fall. Reject such a prediction rather than
+# ship a confidently-wrong boundary; 15 s sits safely under the real minimum.
+FREEFALL_MIN_S = 15.0
+
 # Empirical editing offsets for the product cut (tunable against the final videos):
 # the отделение clip opens CABIN_LEAD_S before the detected exit so it starts IN THE
 # CABIN, and раскрытие ends RASKRYTIE_TRIM_S before the break-off so the operator's
@@ -197,12 +205,22 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
         return
     if not pred:
         return
-    if pred.get("drogue") is not None:
-        out.drogue = Event(type="drogue", t_s=pred["drogue"],
+    drogue_t, deploy_t = pred.get("drogue"), pred.get("deploy")
+    # Sanity guard: if the probe put drogue and deploy within an impossibly short
+    # free-fall (< FREEFALL_MIN_S), it has collapsed the two phases — a known
+    # failure on out-of-distribution footage. Reject both and flag for review,
+    # leaving the heuristic (or empty) boundaries in place rather than overriding
+    # with a wrong prefill the annotator would have to notice and undo.
+    if (drogue_t is not None and deploy_t is not None
+            and deploy_t - drogue_t < FREEFALL_MIN_S):
+        out.degradations.append("PROBE_FREEFALL_IMPLAUSIBLE")
+        return
+    if drogue_t is not None:
+        out.drogue = Event(type="drogue", t_s=drogue_t,
                            source="visual-probe", confidence=0.85)
-    if pred.get("deploy") is not None:
-        end = max(pred["deploy"] + 0.1, breakoff.t_s)
-        out.canopy = Segment(type="canopy", start_s=pred["deploy"], end_s=end,
+    if deploy_t is not None:
+        end = max(deploy_t + 0.1, breakoff.t_s)
+        out.canopy = Segment(type="canopy", start_s=deploy_t, end_s=end,
                              source="visual-probe", confidence=0.91)
 
 

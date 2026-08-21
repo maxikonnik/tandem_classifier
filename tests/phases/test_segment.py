@@ -1,6 +1,32 @@
+import tandem.visual.probe as probe_mod
 from tandem.phases.signals import Signals
 from tandem.phases.detect import Event, Segment
-from tandem.phases.segment import Segmentation, segment_signals, _add_canopy
+from tandem.phases.segment import Segmentation, segment_signals, _add_canopy, _apply_probe
+
+
+def _jump_with_exit_breakoff():
+    return Segmentation(events=[Event("exit", 38.0, "telemetry", 0.9),
+                                Event("operator_breakoff", 95.0, "telemetry", 0.8)])
+
+
+def test_apply_probe_sets_boundaries_when_freefall_plausible(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 42.0, "deploy": 84.0})
+    out = _jump_with_exit_breakoff()
+    _apply_probe(out, "dummy.mp4")
+    assert out.drogue is not None and out.drogue.t_s == 42.0
+    assert out.canopy is not None and out.canopy.start_s == 84.0
+    assert "PROBE_FREEFALL_IMPLAUSIBLE" not in out.degradations
+
+
+def test_apply_probe_rejects_collapsed_freefall(monkeypatch):
+    # drogue and deploy within an impossible <15 s free-fall -> guard rejects both.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 42.0, "deploy": 42.0})
+    out = _jump_with_exit_breakoff()
+    _apply_probe(out, "dummy.mp4")
+    assert out.drogue is None and out.canopy is None
+    assert "PROBE_FREEFALL_IMPLAUSIBLE" in out.degradations
 
 
 def test_to_dict_shape():
