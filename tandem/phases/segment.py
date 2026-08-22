@@ -204,8 +204,8 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True,
 
 def _apply_probe(out: "Segmentation", path: str) -> None:
     """Override the drogue and canopy (deploy) boundaries with the frozen-backbone
-    probe — deploy 91 % / drogue 85 % vs the heuristics' 59 % / 16 % (leave-one-
-    operator-out, 97 jumps). Its window is [exit, break-off], so it needs both.
+    probe — deploy 88 % / drogue 90 % vs the heuristics' 59 % / 16 % (leave-one-
+    session-out, 143 jumps). Its window is [exit, break-off], so it needs both.
     Best-effort: if torch/transformers or the probe weights are missing it does
     nothing and the heuristic boundaries stand."""
     exit_e = next((e for e in out.events if e.type == "exit"), None)

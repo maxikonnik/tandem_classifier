@@ -3,8 +3,9 @@
 DINOv2-small embeddings + a tiny linear probe (weights in ``deploy_probe.json``)
 label each 1 fps frame in [exit, break-off] with its phase; the drogue and deploy
 times are the first frames entering свободное падение and раскрытие. Validated
-leave-one-operator-out on 97 labelled jumps: deploy 91 %, drogue 85 %, median ~0.6 s
-— far above the hand-tuned visual heuristics (59 % / 16 %).
+leave-one-session-out on 143 labelled jumps (97 Samples + 46 D:, 133 sessions):
+deploy 88 %, drogue 90 %, median ~0.6 s, only 2 % physically-impossible collapses —
+far above the hand-tuned visual heuristics (59 % / 16 %).
 
 torch/transformers are OPTIONAL runtime deps, imported lazily. If they (or the
 weights file) are missing, ``predict_boundaries`` returns None and the caller falls
