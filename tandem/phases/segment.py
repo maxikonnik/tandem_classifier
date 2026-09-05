@@ -160,10 +160,12 @@ def segment_signals(sig) -> Segmentation:
     out = Segmentation(phases=list(res.phases), events=list(res.events),
                        degradations=list(res.degradations))
 
-    # Worn DJI action-cam telemetry gives accelerometer only (no gyro/GPS): exit and
-    # free-fall are reliable, but break-off has no gyro turn to key on, so flag it.
+    # Flag DJI provenance: the boundaries come from a worn DJI action-cam's accel +
+    # gyro (no GPS or exposure exit-corroborator, and break-off is a gyro turn whose
+    # meaning depends on who wears the camera), so the annotator should sanity-check
+    # exit and break-off rather than trust them as strongly as on the operator GoPro.
     if getattr(sig, "source", "gpmf") == "dji":
-        out.degradations.append("DJI_TELEMETRY_ACCEL_ONLY")
+        out.degradations.append("DJI_TELEMETRY")
 
     # Independent exit corroborator from camera exposure (daylight onset). Agreement
     # with the accel exit raises confidence; a wide gap is an annotation-priority flag.
