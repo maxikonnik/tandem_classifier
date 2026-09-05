@@ -1,6 +1,8 @@
 import struct
 
-from tandem.phases.signals import Signals, resample, build_signals, pool_min, rolling_std
+from tandem.phases.signals import (Signals, resample, build_signals, pool_min,
+                                    rolling_std, _signals_from_imu,
+                                    build_signals_from_insta360, _SIGNAL_SOURCES)
 
 
 def _klv(key, type_char, sample_size, repeat, payload):
@@ -91,6 +93,24 @@ def test_build_signals_survives_corrupt_gps5():
     assert sig.has_gps is False                 # corrupt GPS payload skipped
     assert abs(sig.accel_mag[0] - 5.0) < 1e-6
     assert len(sig.accel_mag) == len(sig.speed_3d) == len(sig.t_s)
+
+
+def test_signals_from_imu_scales_accel_and_marks_source():
+    # Shared IMU assembly (used by DJI, Insta360, …): accel in g -> m/s^2, source set.
+    accels = [(0.0, 0.0, 1.0)] * 120     # a steady 1 g on the z axis
+    gyros = [(0.0, 0.0, 0.5)] * 120
+    sig = _signals_from_imu(accels, gyros, duration=12.0, fs=10.0, source="insta360")
+    assert sig.source == "insta360"
+    assert sig.has_accel and sig.has_gyro
+    assert abs(sig.accel_mag[0] - 9.80665) < 1e-3   # 1 g becomes ~9.8 m/s^2
+    assert len(sig.accel_mag) == len(sig.gyro_mag) == len(sig.t_s)
+    assert all(v == 0.0 for v in sig.speed_3d)      # no GPS on an IMU-only camera
+
+
+def test_insta360_source_is_registered_and_stub_returns_none():
+    # The Insta360 slot is wired into the registry but its parser is still a stub.
+    assert build_signals_from_insta360 in _SIGNAL_SOURCES
+    assert build_signals_from_insta360("does_not_exist.mp4") is None
 
 
 def test_build_signals_accumulates_across_payloads():

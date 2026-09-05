@@ -376,23 +376,26 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     return sig
 
 
-def build_signals_from_dji(path: str, fs: float = 10.0) -> Signals | None:
-    """Build a Signals from a worn DJI action-cam's ``djmd`` telemetry (accel + gyro).
+# --- Telemetry sources -------------------------------------------------------------
+#
+# Different cameras log motion telemetry in incompatible formats: GoPro in GPMF (KLV),
+# DJI and Insta360 in their own per-frame streams. Each is a "signal source": a
+# self-detecting function ``(path, fs) -> Signals | None`` that returns None when the
+# file is not its format. ``build_signals_from_file`` tries the registered sources in
+# order and takes the first that yields a Signals. Adding a camera is: write a raw
+# parser under ``tandem/recon/<camera>.py`` exposing ``read_telemetry`` (the IMU
+# contract below), add a ``build_signals_from_<camera>`` wrapper, and register it in
+# ``_SIGNAL_SOURCES``. The Signals' ``source`` field records which camera produced it.
 
-    DJI cameras log no GoPro GPMF, so the normal path yields nothing; this decodes
-    their protobuf accelerometer and gyroscope instead. GPS/exposure are not decoded,
-    but accel gives exit and free-fall and gyro gives the break-off turn, so all
-    telemetry boundaries are available; the visual probe still supplies drogue/deploy.
-    Returns None when there is no DJI telemetry or too few samples.
+
+def _signals_from_imu(accels, gyros, duration: float, fs: float, source: str) -> Signals:
+    """Assemble a Signals from an IMU-only camera: per-frame ``accels`` in g and
+    ``gyros`` in native angular rate, both lists of ``(x, y, z)``. Shared by every
+    IMU camera (DJI, Insta360, …) so they differ only in their raw parser. Accel is
+    scaled to m/s^2 (the detector's unit); GPS/exposure/face channels are zero-filled.
     """
-    from tandem.recon.dji import read_telemetry
-    tel = read_telemetry(path)
-    if tel is None:
-        return None
-    accels, gyros, duration = tel
     if duration <= 0:
-        duration = len(accels) / 60.0  # DJI logs one sample per frame (~60 Hz)
-    # DJI accel is in g; the detector's thresholds are in m/s^2, so scale by G.
+        duration = len(accels) / 60.0  # these cameras log one sample per frame (~60 Hz)
     mag = [(a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5 * G for a in accels]
     ax = [a[0] * G for a in accels]
     ay = [a[1] * G for a in accels]
@@ -404,7 +407,7 @@ def build_signals_from_dji(path: str, fs: float = 10.0) -> Signals | None:
 
     sig = Signals(fs=fs, has_accel=True, has_gps=False, has_gyro=True,
                   has_exposure=False, has_face=False, has_audio=False, has_scene=False,
-                  source="dji")
+                  source=source)
     n_out = max(2, int(round(duration * fs)))
     sig.t_s = [i / fs for i in range(n_out)]
     sig.accel_mag = resample(mag, n_out)
@@ -426,9 +429,57 @@ def build_signals_from_dji(path: str, fs: float = 10.0) -> Signals | None:
     return sig
 
 
-def build_signals_from_file(path: str, fs: float = 10.0) -> Signals | None:
+def build_signals_from_gopro(path: str, fs: float = 10.0) -> Signals | None:
+    """GoPro source: the rich GPMF telemetry (accel, gyro, GPS, exposure, face, …)."""
     blob = extract_gpmf_blob(path)
-    if blob:
-        return build_signals(blob, fs=fs)
-    # No GoPro GPMF: fall back to worn DJI action-cam telemetry (accel-only).
-    return build_signals_from_dji(path, fs=fs)
+    if not blob:
+        return None
+    return build_signals(blob, fs=fs)
+
+
+def build_signals_from_dji(path: str, fs: float = 10.0) -> Signals | None:
+    """DJI source: a worn action-cam's ``djmd`` protobuf accelerometer + gyroscope.
+
+    Accel gives exit and free-fall, gyro gives the break-off turn; GPS/exposure are
+    not logged. Returns None when the file has no DJI telemetry.
+    """
+    from tandem.recon.dji import read_telemetry
+    tel = read_telemetry(path)
+    if tel is None:
+        return None
+    accels, gyros, duration = tel
+    return _signals_from_imu(accels, gyros, duration, fs, source="dji")
+
+
+def build_signals_from_insta360(path: str, fs: float = 10.0) -> Signals | None:
+    """Insta360 source: IMU (accel + gyro) from the camera's metadata stream.
+
+    Wired into the source registry so Insta360 footage flows through the same
+    detector once its raw parser lands. ``tandem/recon/insta360.py`` must expose
+    ``read_telemetry(path) -> (accels_g, gyros, duration) | None`` (the same contract
+    as the DJI parser); until it decodes a real format it returns None and Insta360
+    files simply fall through, exactly as before.
+    """
+    from tandem.recon.insta360 import read_telemetry
+    tel = read_telemetry(path)
+    if tel is None:
+        return None
+    accels, gyros, duration = tel
+    return _signals_from_imu(accels, gyros, duration, fs, source="insta360")
+
+
+# Ordered telemetry sources; the first to recognise the file wins. GoPro leads as the
+# common case; the rest self-detect and return None on a foreign format.
+_SIGNAL_SOURCES = (
+    build_signals_from_gopro,
+    build_signals_from_dji,
+    build_signals_from_insta360,
+)
+
+
+def build_signals_from_file(path: str, fs: float = 10.0) -> Signals | None:
+    for build in _SIGNAL_SOURCES:
+        sig = build(path, fs=fs)
+        if sig is not None:
+            return sig
+    return None
