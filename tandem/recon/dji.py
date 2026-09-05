@@ -19,7 +19,13 @@ from __future__ import annotations
 import struct
 import subprocess
 
-_MAG_MAX_G = 16.0          # plausible specific-force magnitude, g (reject mis-decodes)
+# Plausible specific-force magnitude band, in g. The upper bound rejects mis-decoded
+# triples; the lower bound rejects parse artifacts: a frame whose accel sub-message we
+# fail to locate decodes to (0,0,0), and a real accelerometer never reads exactly zero
+# — even true free-fall keeps ~0.2 g of buffeting. Left in, those zeros poison the
+# free-fall detector's per-window minimum and fabricate a jump on a ground clip.
+_MAG_MIN_G = 0.02
+_MAG_MAX_G = 16.0
 _ACCEL_TAG = 0x4A          # protobuf field 9, wire type 2 (accel sub-message)
 _GYRO_TAG = 0x52           # protobuf field 10, wire type 2 (gyro sub-message)
 
@@ -135,7 +141,7 @@ def read_telemetry(path: str):
         if a is None:
             continue
         m = (a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5
-        if not (0.0 <= m < _MAG_MAX_G):
+        if not (_MAG_MIN_G <= m < _MAG_MAX_G):
             continue
         g = _find_vec(fr, _GYRO_TAG) or (0.0, 0.0, 0.0)
         accels.append(a)

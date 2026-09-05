@@ -68,6 +68,27 @@ def test_add_canopy_rejects_deploy_outside_exit_window(monkeypatch):
     assert "DEPLOY_SPAN_IMPLAUSIBLE" in out.degradations
 
 
+def test_dji_exit_dropped_without_real_freefall(monkeypatch):
+    # An accel-only (DJI) clip whose accel never enters free-fall is not a jump: a
+    # ground/handling jerk can still make detect_phases emit an exit, so the guard
+    # must drop it. Fake a detect_phases that returns an exit + free-fall phase.
+    import tandem.phases.segment as segmod
+    from tandem.phases.signals import Signals
+
+    class _Res:
+        phases = [Segment("freefall", 5.0, 35.0, "telemetry", 0.5)]
+        events = [Event("exit", 5.0, "accel", 0.5)]
+        degradations = []
+
+    monkeypatch.setattr(segmod, "detect_phases", lambda sig: _Res())
+    sig = Signals(source="dji")
+    sig.accel_mag = [9.5] * 50            # stays near 1 g — never free-fall
+    out = segmod.segment_signals(sig)
+    assert not any(e.type == "exit" for e in out.events)
+    assert out.tracking_window is None
+    assert "DJI_TELEMETRY" in out.degradations
+
+
 def test_add_canopy_accepts_deploy_inside_exit_window(monkeypatch):
     monkeypatch.setattr(deploy_mod, "detect_deploy",
                         lambda *a, **k: (84.0, 0.5))   # 46 s after exit

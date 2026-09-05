@@ -38,6 +38,14 @@ FREEFALL_MIN_S = 15.0
 EXIT_DEPLOY_MIN_S = 18.0
 EXIT_DEPLOY_MAX_S = 60.0
 
+# For accel-only cameras (DJI, Insta360) with no exposure/GPS exit-corroborator, the
+# exit detector can fire on a ground or handling jerk. A real jump enters free-fall,
+# where the accelerometer drops toward weightlessness; a ground clip never does. So
+# confirm a jump by requiring the accel magnitude to dip below this floor (~0.5 g)
+# somewhere — a tandem in drogue free-fall reads ~0.2 g, well under it, while a held
+# camera sits near 1 g (~9.8 m/s^2).
+FREEFALL_CONFIRM_MS2 = 5.0
+
 
 def _deploy_span_ok(exit_t: float, deploy_t: float) -> bool:
     """Whether a deploy time is physically plausible given the exit: the exit ->
@@ -168,6 +176,16 @@ def segment_signals(sig) -> Segmentation:
     source = getattr(sig, "source", "gpmf")
     if source != "gpmf":
         out.degradations.append(f"{source.upper()}_TELEMETRY")
+        # Confirm a real jump: an accel-only camera's exit can fire on a ground jerk,
+        # so require the accelerometer to actually enter free-fall somewhere. If it
+        # never drops below the weightlessness floor, this is not a jump — drop the
+        # boundary events (and free-fall phase) so no spurious prefill is emitted.
+        if not (sig.accel_mag and min(sig.accel_mag) < FREEFALL_CONFIRM_MS2):
+            out.events = [e for e in out.events
+                          if e.type not in ("exit", "operator_breakoff")]
+            out.phases = [p for p in out.phases if p.type != "freefall"]
+            out.tracking_window = None
+            return out
 
     # Independent exit corroborator from camera exposure (daylight onset). Agreement
     # with the accel exit raises confidence; a wide gap is an annotation-priority flag.
