@@ -49,6 +49,7 @@ class Signals:
     has_face: bool = False
     has_audio: bool = False
     has_scene: bool = False
+    source: str = "gpmf"   # "gpmf" (GoPro) or "dji" (worn DJI action-cam, accel-only)
 
 
 def _flatten(klv) -> list[float]:
@@ -375,8 +376,59 @@ def build_signals(blob: bytes, fs: float = 10.0) -> Signals:
     return sig
 
 
+def build_signals_from_dji(path: str, fs: float = 10.0) -> Signals | None:
+    """Build a Signals from a worn DJI action-cam's ``djmd`` telemetry (accel + gyro).
+
+    DJI cameras log no GoPro GPMF, so the normal path yields nothing; this decodes
+    their protobuf accelerometer and gyroscope instead. GPS/exposure are not decoded,
+    but accel gives exit and free-fall and gyro gives the break-off turn, so all
+    telemetry boundaries are available; the visual probe still supplies drogue/deploy.
+    Returns None when there is no DJI telemetry or too few samples.
+    """
+    from tandem.recon.dji import read_telemetry
+    tel = read_telemetry(path)
+    if tel is None:
+        return None
+    accels, gyros, duration = tel
+    if duration <= 0:
+        duration = len(accels) / 60.0  # DJI logs one sample per frame (~60 Hz)
+    # DJI accel is in g; the detector's thresholds are in m/s^2, so scale by G.
+    mag = [(a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5 * G for a in accels]
+    ax = [a[0] * G for a in accels]
+    ay = [a[1] * G for a in accels]
+    az = [a[2] * G for a in accels]
+    gx = [g[0] for g in gyros]
+    gy = [g[1] for g in gyros]
+    gz = [g[2] for g in gyros]
+    gmag = [(g[0] ** 2 + g[1] ** 2 + g[2] ** 2) ** 0.5 for g in gyros]
+
+    sig = Signals(fs=fs, has_accel=True, has_gps=False, has_gyro=True,
+                  has_exposure=False, has_face=False, has_audio=False, has_scene=False,
+                  source="dji")
+    n_out = max(2, int(round(duration * fs)))
+    sig.t_s = [i / fs for i in range(n_out)]
+    sig.accel_mag = resample(mag, n_out)
+    sig.accel_min = pool_min(mag, n_out)
+    sig.ax = resample(ax, n_out)
+    sig.ay = resample(ay, n_out)
+    sig.az = resample(az, n_out)
+    sig.accel_std = rolling_std([a / G for a in sig.accel_mag], round(STD_WINDOW_S * fs))
+    sig.gyro_mag = resample(gmag, n_out)
+    sig.gx = resample(gx, n_out)
+    sig.gy = resample(gy, n_out)
+    sig.gz = resample(gz, n_out)
+    zeros = [0.0] * n_out
+    sig.speed_3d = list(zeros)
+    sig.iso = list(zeros); sig.shutter = list(zeros)
+    sig.face_count = list(zeros); sig.smile = list(zeros)
+    sig.blink = list(zeros); sig.face_area = list(zeros)
+    sig.audio_level = list(zeros); sig.scene_indoor = list(zeros)
+    return sig
+
+
 def build_signals_from_file(path: str, fs: float = 10.0) -> Signals | None:
     blob = extract_gpmf_blob(path)
-    if not blob:
-        return None
-    return build_signals(blob, fs=fs)
+    if blob:
+        return build_signals(blob, fs=fs)
+    # No GoPro GPMF: fall back to worn DJI action-cam telemetry (accel-only).
+    return build_signals_from_dji(path, fs=fs)

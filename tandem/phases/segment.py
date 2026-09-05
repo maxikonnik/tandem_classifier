@@ -160,6 +160,11 @@ def segment_signals(sig) -> Segmentation:
     out = Segmentation(phases=list(res.phases), events=list(res.events),
                        degradations=list(res.degradations))
 
+    # Worn DJI action-cam telemetry gives accelerometer only (no gyro/GPS): exit and
+    # free-fall are reliable, but break-off has no gyro turn to key on, so flag it.
+    if getattr(sig, "source", "gpmf") == "dji":
+        out.degradations.append("DJI_TELEMETRY_ACCEL_ONLY")
+
     # Independent exit corroborator from camera exposure (daylight onset). Agreement
     # with the accel exit raises confidence; a wide gap is an annotation-priority flag.
     exp_exit = detect_exit_exposure(sig)
@@ -205,16 +210,24 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True,
 def _apply_probe(out: "Segmentation", path: str) -> None:
     """Override the drogue and canopy (deploy) boundaries with the frozen-backbone
     probe — deploy 88 % / drogue 90 % vs the heuristics' 59 % / 16 % (leave-one-
-    session-out, 143 jumps). Its window is [exit, break-off], so it needs both.
-    Best-effort: if torch/transformers or the probe weights are missing it does
-    nothing and the heuristic boundaries stand."""
+    session-out, 143 jumps). Its window is [exit, window_end]; window_end is the
+    break-off when detected, else the free-fall end (tracking_window). The latter
+    keeps the probe working on DJI accel-only telemetry, which has no gyro turn to
+    give a break-off. Best-effort: if torch/transformers or the probe weights are
+    missing it does nothing and the heuristic boundaries stand."""
     exit_e = next((e for e in out.events if e.type == "exit"), None)
+    if exit_e is None:
+        return
     breakoff = next((e for e in out.events if e.type == "operator_breakoff"), None)
-    if exit_e is None or breakoff is None:
+    if breakoff is not None:
+        window_end = breakoff.t_s
+    elif out.tracking_window is not None:
+        window_end = out.tracking_window[1]
+    else:
         return
     try:
         from tandem.visual.probe import predict_boundaries
-        pred = predict_boundaries(path, exit_e.t_s, breakoff.t_s)
+        pred = predict_boundaries(path, exit_e.t_s, window_end)
     except Exception:
         return
     if not pred:
@@ -238,7 +251,7 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
             # and flag rather than ship a canopy at the wrong depth of the jump.
             out.degradations.append("DEPLOY_SPAN_IMPLAUSIBLE")
             return
-        end = max(deploy_t + 0.1, breakoff.t_s)
+        end = max(deploy_t + 0.1, window_end)
         out.canopy = Segment(type="canopy", start_s=deploy_t, end_s=end,
                              source="visual-probe", confidence=0.91)
 
