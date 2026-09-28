@@ -69,6 +69,7 @@ class Segmentation:
     drogue: Event | None = None                                  # drogue throw = free-fall start (visual)
     tracking_window: tuple[float, float] | None = None           # [exit, break-off | freefall end]
     degradations: list[str] = field(default_factory=list)
+    source: str = "gpmf"                                         # telemetry camera: gpmf / dji / insta360
 
     def intervals(self) -> list[dict]:
         """The product target: the three intervals on the jump, from the detected
@@ -174,6 +175,7 @@ def segment_signals(sig) -> Segmentation:
     # the annotator should sanity-check exit and break-off rather than trust them as
     # strongly as on the operator GoPro. The flag is "<SOURCE>_TELEMETRY".
     source = getattr(sig, "source", "gpmf")
+    out.source = source
     if source != "gpmf":
         out.degradations.append(f"{source.upper()}_TELEMETRY")
         # Confirm a real jump: an accel-only camera's exit can fire on a ground jerk,
@@ -254,6 +256,26 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
         return
     if not pred:
         return
+    # A pre-exit-aware probe also locates exit visually: record it as an independent
+    # corroborator (like exit_exposure) and flag a wide gap to the telemetry exit.
+    vis_exit = pred.get("exit")
+    if vis_exit is not None:
+        out.events.append(Event(type="exit_visual", t_s=vis_exit,
+                                source="visual-probe", confidence=0.85))
+        if abs(vis_exit - exit_e.t_s) > EXIT_AGREE_S:
+            out.degradations.append("VISUAL_EXIT_DISAGREEMENT")
+        if out.source != "gpmf":
+            # An accel-only camera (DJI, Insta360) has no exposure corroborator and its
+            # accel exit fires on in-cabin movement at the door (seen 7-17 s early on
+            # DJI jumps, giving implausible 12-22 s exit->drogue gaps). The visual exit
+            # is the primary one there; the telemetry exit is kept for reference.
+            out.events = [e for e in out.events if e is not exit_e]
+            out.events.append(Event(type="exit_telemetry", t_s=exit_e.t_s,
+                                    source=exit_e.source, confidence=exit_e.confidence))
+            exit_e = Event(type="exit", t_s=vis_exit, source="visual-probe", confidence=0.85)
+            out.events.append(exit_e)
+            if out.tracking_window is not None:
+                out.tracking_window = (vis_exit, out.tracking_window[1])
     drogue_t, deploy_t = pred.get("drogue"), pred.get("deploy")
     # Sanity guard: if the probe put drogue and deploy within an impossibly short
     # free-fall (< FREEFALL_MIN_S), it has collapsed the two phases — a known
@@ -276,6 +298,9 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
         end = max(deploy_t + 0.1, window_end)
         out.canopy = Segment(type="canopy", start_s=deploy_t, end_s=end,
                              source="visual-probe", confidence=0.91)
+        # A span flag raised earlier by the heuristic path refers to the deploy just
+        # replaced (often measured from a bad accel exit); the final one passed the guard.
+        out.degradations = [d for d in out.degradations if d != "DEPLOY_SPAN_IMPLAUSIBLE"]
 
 
 def _add_drogue(out: "Segmentation", path: str) -> None:

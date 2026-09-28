@@ -31,6 +31,53 @@ def test_apply_probe_rejects_collapsed_freefall(monkeypatch):
     assert "PROBE_FREEFALL_IMPLAUSIBLE" in out.degradations
 
 
+def test_apply_probe_records_visual_exit_and_flags_disagreement(monkeypatch):
+    # telemetry exit 38 s; the probe sees the cabin end at 50 s -> 12 s apart.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"exit": 50.0, "drogue": 55.0, "deploy": 90.0})
+    out = _jump_with_exit_breakoff()
+    _apply_probe(out, "dummy.mp4")
+    vis = [e for e in out.events if e.type == "exit_visual"]
+    assert len(vis) == 1 and vis[0].t_s == 50.0
+    assert "VISUAL_EXIT_DISAGREEMENT" in out.degradations
+    # the telemetry exit stays the exit boundary
+    assert next(e for e in out.events if e.type == "exit").t_s == 38.0
+
+
+def test_apply_probe_visual_exit_agreeing_is_not_flagged(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"exit": 39.0, "drogue": 42.0, "deploy": 84.0})
+    out = _jump_with_exit_breakoff()
+    _apply_probe(out, "dummy.mp4")
+    assert "VISUAL_EXIT_DISAGREEMENT" not in out.degradations
+
+
+def test_apply_probe_visual_exit_is_primary_for_accel_only_camera(monkeypatch):
+    # DJI: the accel exit fired early in the cabin; the visual exit takes over and the
+    # telemetry one is kept as exit_telemetry. drogue 4 s after the visual exit.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"exit": 55.0, "drogue": 59.0, "deploy": 90.0})
+    out = _jump_with_exit_breakoff()          # telemetry exit 38, break-off 95
+    out.source = "dji"
+    out.tracking_window = (38.0, 95.0)
+    _apply_probe(out, "dummy.mp4")
+    assert next(e for e in out.events if e.type == "exit").t_s == 55.0
+    assert next(e for e in out.events if e.type == "exit_telemetry").t_s == 38.0
+    assert out.tracking_window == (55.0, 95.0)
+    assert out.canopy is not None and out.canopy.start_s == 90.0   # 35 s after exit: ok
+
+
+def test_apply_probe_clears_stale_heuristic_span_flag(monkeypatch):
+    # the heuristic deploy was rejected (flag set) but the probe places a valid one.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 42.0, "deploy": 84.0})
+    out = _jump_with_exit_breakoff()
+    out.degradations.append("DEPLOY_SPAN_IMPLAUSIBLE")
+    _apply_probe(out, "dummy.mp4")
+    assert out.canopy is not None
+    assert "DEPLOY_SPAN_IMPLAUSIBLE" not in out.degradations
+
+
 def test_deploy_span_ok_bounds():
     # exit at 40: deploy plausible only within [40+18, 40+60] = [58, 100].
     assert _deploy_span_ok(40.0, 90.0) is True
