@@ -21,6 +21,8 @@ from tandem.phases.signals import build_signals_from_file
 
 # Accel and exposure exits should agree within this; a wider gap is flagged for review.
 EXIT_AGREE_S = 3.0
+# Visual vs gyroscope break-off gap above which the jump is flagged for review.
+BREAKOFF_AGREE_S = 3.0
 
 # Physical floor on the drogue -> deploy span (свободное падение). A drogue-slowed
 # tandem falls for tens of seconds before the d-bag; in the 97 hand-labelled jumps
@@ -276,6 +278,24 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
             out.events.append(exit_e)
             if out.tracking_window is not None:
                 out.tracking_window = (vis_exit, out.tracking_window[1])
+    # Break-off (отворот) is the pair leaving the operator's frame — a visual event.
+    # A probe trained on post-break-off frames finds it directly; it then replaces the
+    # gyroscope turn (kept as breakoff_telemetry) and also fills jumps where the gyro
+    # found none. The раскрытие interval ends at the final break-off.
+    vis_bo = pred.get("breakoff")
+    if vis_bo is not None:
+        if breakoff is not None:
+            if abs(vis_bo - breakoff.t_s) > BREAKOFF_AGREE_S:
+                out.degradations.append("VISUAL_BREAKOFF_DISAGREEMENT")
+            out.events = [e for e in out.events if e is not breakoff]
+            out.events.append(Event(type="breakoff_telemetry", t_s=breakoff.t_s,
+                                    source=breakoff.source, confidence=breakoff.confidence))
+        breakoff = Event(type="operator_breakoff", t_s=vis_bo,
+                         source="visual-probe", confidence=0.85)
+        out.events.append(breakoff)
+        window_end = vis_bo
+        if out.tracking_window is not None:
+            out.tracking_window = (out.tracking_window[0], vis_bo)
     drogue_t, deploy_t = pred.get("drogue"), pred.get("deploy")
     # Sanity guard: if the probe put drogue and deploy within an impossibly short
     # free-fall (< FREEFALL_MIN_S), it has collapsed the two phases — a known

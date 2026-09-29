@@ -78,6 +78,30 @@ def test_apply_probe_clears_stale_heuristic_span_flag(monkeypatch):
     assert "DEPLOY_SPAN_IMPLAUSIBLE" not in out.degradations
 
 
+def test_apply_probe_visual_breakoff_replaces_gyro_and_ends_raskrytie(monkeypatch):
+    # gyro break-off 95 s; the pair leaves the frame at 88 s.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 42.0, "deploy": 84.0, "breakoff": 88.0})
+    out = _jump_with_exit_breakoff()
+    out.tracking_window = (38.0, 95.0)
+    _apply_probe(out, "dummy.mp4")
+    assert next(e for e in out.events if e.type == "operator_breakoff").t_s == 88.0
+    assert next(e for e in out.events if e.type == "breakoff_telemetry").t_s == 95.0
+    assert "VISUAL_BREAKOFF_DISAGREEMENT" in out.degradations
+    assert out.canopy.end_s == 88.0 and out.tracking_window == (38.0, 88.0)
+
+
+def test_apply_probe_visual_breakoff_fills_a_missing_gyro_breakoff(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"drogue": 42.0, "deploy": 84.0, "breakoff": 88.5})
+    out = Segmentation(events=[Event("exit", 38.0, "telemetry", 0.9)],
+                       tracking_window=(38.0, 100.0))          # gyro found no break-off
+    _apply_probe(out, "dummy.mp4")
+    assert next(e for e in out.events if e.type == "operator_breakoff").t_s == 88.5
+    assert "VISUAL_BREAKOFF_DISAGREEMENT" not in out.degradations
+    assert len(out.intervals()) == 3                         # раскрытие now closes
+
+
 def test_deploy_span_ok_bounds():
     # exit at 40: deploy plausible only within [40+18, 40+60] = [58, 100].
     assert _deploy_span_ok(40.0, 90.0) is True

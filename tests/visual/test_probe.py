@@ -48,3 +48,32 @@ def test_boundary_unknown_when_span_opens_past_it():
     assert _boundary(past, ts, 1) is None
     assert _boundary(past, ts, 4) == 3.0          # this one is seen in-span
     assert _boundary(np.array([0, 0, 1, 1, 2, 2]), ts, 1) == 2.0
+
+
+def _emissions(labels, n_classes=5, p=0.9):
+    lp = np.full((len(labels), n_classes), np.log((1 - p) / (n_classes - 1)))
+    lp[np.arange(len(labels)), labels] = np.log(p)
+    return lp
+
+
+def test_decode_ignores_spurious_deploy_frames_in_freefall():
+    from tandem.visual.probe import _decode, _duration_prior
+    # cabin 0-9, отделение 10-13, free-fall 14-49, раскрытие 50-53, после 54-59
+    labels = np.array([0] * 10 + [1] * 4 + [2] * 36 + [3] * 4 + [4] * 6)
+    labels[20:22] = 3            # two confident "раскрытие" frames deep in free-fall
+    priors = [None,
+              _duration_prior([np.log(4.0), 0.25]),
+              _duration_prior([np.log(36.0), 0.15]),
+              _duration_prior([np.log(4.0), 0.3]),
+              _duration_prior(None)]
+    starts = _decode(_emissions(labels), priors, dt=1.0)
+    assert starts[1:] == [10, 14, 50, 54]    # argmax + first crossing would say deploy=20
+
+
+def test_decode_finds_no_transition_in_an_all_cabin_clip():
+    from tandem.visual.probe import _decode, _duration_prior
+    priors = [None] + [_duration_prior([np.log(d), 0.2]) for d in (4.0, 44.0, 4.0)] \
+        + [_duration_prior(None)]
+    n = 40
+    starts = _decode(_emissions(np.zeros(n, int)), priors, dt=1.0)
+    assert starts[1:] == [n, n, n, n]        # every later phase "never begins" in the span

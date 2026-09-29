@@ -1,21 +1,28 @@
 """Frozen-backbone probe for the visual phase boundaries (exit, drogue, deploy).
 
-DINOv2-small embeddings + a tiny linear probe (weights in ``deploy_probe.json``)
-label each frame with its phase; a boundary is the first sustained frame of the next
-phase. The coarse pass runs at 1 fps; exit is then refined at ``REFINE_FPS`` inside a
-±``REFINE_HALF_S`` window around the coarse transition, cutting the 1 s sampling step.
+DINOv2-small embeddings + a tiny linear probe (weights in ``deploy_probe.json``) give
+per-frame phase log-probabilities. Phases are strictly ordered and each occupies one
+contiguous run, so the boundaries are decoded jointly (segmental / HSMM decoding):
+the split that maximises the frame log-probs plus a log-prior on how long each phase
+lasts (fitted on the labelled jumps). That rules out, e.g., a "раскрытие" frame deep
+in free-fall pulling deploy 40 s early. The coarse pass runs at 1 fps; exit is then
+refined at ``REFINE_FPS`` inside ±``REFINE_HALF_S`` around it.
 
-Phases are time-ordered. A 5-class probe starts with "до отделения" (the cabin) and
-therefore finds exit on its own; the older 4-class probe starts at "отделение" and
-gives drogue/deploy only. Both weight layouts are supported. Validated
-leave-one-session-out on 153 labelled jumps (5-class, 140 sessions), share within 2 s:
-drogue 92 %, deploy 92 % (4-class was 90 / 88 %), exit 98 %. Exit refined at 5 fps and
-lag-calibrated: 98 % within 1 s, median 0.2 s — also with a grid not aligned to the
-exit (DJI / no telemetry), where plain 1 fps gives 66 % within 1 s, median 0.8 s.
+A 5-class probe starts with "до отделения" (the cabin) and therefore finds exit on its
+own; the older 4-class probe starts at "отделение" and gives drogue/deploy only. Weights
+without phase durations fall back to argmax + majority smoothing + first crossing.
 
-torch/transformers are OPTIONAL runtime deps, imported lazily. If they (or the
-weights file) are missing, the predictors return None and the caller falls back to
-the heuristic detectors.
+Trained with post-break-off frames too, so break-off is found visually (the pair
+leaving the frame) when the weights say ``visual_breakoff``. Validated
+leave-one-session-out on 153 labelled jumps (140 sessions), share within 2 s with HSMM
+decoding: exit 99 %, drogue 96 %, deploy 98 %, break-off 93 % (argmax: 98 / 90 / 91 /
+91 %; the gyroscope break-off: 83 %, and none at all on 16 % of jumps). Exit refined at
+5 fps and lag-calibrated: 98 % within 1 s, median 0.2 s — also with a sampling grid not
+aligned to the exit (DJI / no telemetry), where plain 1 fps gives 66 %, median 0.8 s.
+
+torch/transformers are OPTIONAL runtime deps, imported lazily. If they (or the weights
+file) are missing, the predictors return None and the caller falls back to the
+heuristic detectors.
 """
 from __future__ import annotations
 
@@ -32,7 +39,14 @@ _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
 _BATCH = 16
 
-# Exit refinement: re-classify at 5 fps within ±3 s of the 1 fps transition and take
+# HSMM decoding: logits are divided by HSMM_TEMP before the log-softmax (the linear
+# probe is over-confident; 1, 2 and 4 all beat argmax, 2 is the middle choice). Phase
+# durations are log-normal mixed with a DUR_EPS uniform floor over [0, DUR_UMAX] s.
+HSMM_TEMP = 2.0
+DUR_EPS = 0.02
+DUR_UMAX = 200.0
+
+# Exit refinement: re-classify at 5 fps within ±3 s of the coarse transition and take
 # the first run of REFINE_RUN consecutive frames past the cabin (0.6 s at 5 fps), so a
 # single ambiguous door-frame does not trigger it.
 REFINE_FPS = 5
@@ -109,8 +123,55 @@ def _smooth(cls, n_classes, width=3):
     return sm
 
 
+def _log_softmax(z):
+    z = z - z.max(1, keepdims=True)
+    return z - np.log(np.exp(z).sum(1, keepdims=True))
+
+
+def _duration_prior(params):
+    """log-prior of a phase lasting x seconds: log-normal (mean/sd of log-seconds)
+    mixed with a small uniform floor so outliers stay possible; flat without params."""
+    if params is None:
+        return lambda x: np.zeros_like(np.asarray(x, float))
+    mu, sd = params
+
+    def f(x):
+        x = np.asarray(x, float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lx = np.log(np.maximum(x, 1e-9))
+            ln = np.where(x > 0, -lx - np.log(sd * np.sqrt(2 * np.pi))
+                          - (lx - mu) ** 2 / (2 * sd * sd), -np.inf)
+        return np.logaddexp(np.log(1 - DUR_EPS) + ln, np.log(DUR_EPS / DUR_UMAX))
+    return f
+
+
+def _decode(logp, priors, dt):
+    """Split N frames into the ordered phases — each one contiguous run, possibly
+    empty — maximising summed log-probs plus the duration log-prior of every phase
+    after the first. Exact O(C·N²) dynamic programme; returns each phase's start index
+    (N for a phase that never begins inside the span)."""
+    N, C = logp.shape
+    S = np.vstack([np.zeros(C), np.cumsum(logp, 0)])
+    dp = np.full((C, N + 1), -np.inf)
+    arg = np.zeros((C, N + 1), int)
+    dp[0] = S[:, 0]
+    for c in range(1, C):
+        for b in range(N + 1):
+            a = np.arange(b + 1)
+            sc = dp[c - 1, a] + (S[b, c] - S[a, c]) + priors[c]((b - a) * dt)
+            k = int(np.argmax(sc))
+            dp[c, b] = sc[k]
+            arg[c, b] = a[k]
+    starts = [0] * C
+    b = N
+    for c in range(C - 1, 0, -1):
+        starts[c] = int(arg[c, b])
+        b = starts[c]
+    return starts
+
+
 def _classify_span(path, lo, hi, fps, cfg, model):
-    """``(ts, class per frame)`` for frames sampled at ``fps`` in [lo, hi], or None."""
+    """``(ts, logits per frame)`` for frames sampled at ``fps`` in [lo, hi], or None."""
     td = tempfile.mkdtemp()
     try:
         subprocess.run(["ffmpeg", "-y", "-ss", f"{lo:.2f}", "-to", f"{hi:.2f}", "-i", path,
@@ -130,7 +191,7 @@ def _classify_span(path, lo, hi, fps, cfg, model):
     ts = np.array([lo + i / fps for i in range(len(emb))], np.float32)
     mu = np.array(cfg["mu"], np.float32); sd = np.array(cfg["sd"], np.float32)
     W = np.array(cfg["W"], np.float32); b = np.array(cfg["b"], np.float32)
-    return ts, (((emb - mu) / sd) @ W.T + b).argmax(1)
+    return ts, ((emb - mu) / sd) @ W.T + b
 
 
 def _refine(path, coarse_t, k, cfg, model, lag_s=0.0):
@@ -142,8 +203,8 @@ def _refine(path, coarse_t, k, cfg, model, lag_s=0.0):
                          REFINE_FPS, cfg, model)
     if got is None:
         return coarse_t
-    ts, cls = got
-    sm = _smooth(cls, len(cfg["phases"]), REFINE_SMOOTH)
+    ts, z = got
+    sm = _smooth(z.argmax(1), len(cfg["phases"]), REFINE_SMOOTH)
     if sm[0] >= k:            # fine window opens past the transition: cannot place it
         return coarse_t
     fine = _first_run_ge(sm, ts, k, REFINE_RUN)
@@ -163,7 +224,8 @@ def predict_boundaries(path: str, exit_t: float, breakoff_t: float):
     except Exception:
         return None
     pre = float(cfg.get("pre_s", 1.0))
-    return predict_span(path, max(0.0, exit_t - pre), breakoff_t + 1.0)
+    post = float(cfg.get("post_s", 1.0))
+    return predict_span(path, max(0.0, exit_t - pre), breakoff_t + post)
 
 
 def predict_span(path: str, lo: float, hi: float):
@@ -179,15 +241,27 @@ def predict_span(path: str, lo: float, hi: float):
     got = _classify_span(path, lo, hi, 1, cfg, model)
     if got is None:
         return None
-    ts, cls = got
+    ts, z = got
     phases = cfg["phases"]
-    sm = _smooth(cls, len(phases))
+    if cfg.get("durations"):
+        priors = [_duration_prior(cfg["durations"].get(p)) for p in phases]
+        starts = _decode(_log_softmax(z / HSMM_TEMP), priors, dt=1.0)
+
+        def at(name):
+            s = starts[phases.index(name)]
+            return float(ts[s]) if 0 < s < len(ts) else None   # outside the span = unseen
+    else:
+        sm = _smooth(z.argmax(1), len(phases))
+
+        def at(name):
+            return _boundary(sm, ts, phases.index(name))
     exit_t = None
     if "до отделения" in phases:
-        k = phases.index("отделение")
-        exit_t = _boundary(sm, ts, k)
+        exit_t = at("отделение")
         if exit_t is not None:
-            exit_t = _refine(path, exit_t, k, cfg, model, lag_s=EXIT_VISUAL_LAG_S)
-    return {"exit": exit_t,
-            "drogue": _boundary(sm, ts, phases.index("свободное падение")),
-            "deploy": _boundary(sm, ts, phases.index("раскрытие"))}
+            exit_t = _refine(path, exit_t, phases.index("отделение"), cfg, model,
+                             lag_s=EXIT_VISUAL_LAG_S)
+    out = {"exit": exit_t, "drogue": at("свободное падение"), "deploy": at("раскрытие")}
+    if cfg.get("visual_breakoff") and "после" in phases:
+        out["breakoff"] = at("после")
+    return out
