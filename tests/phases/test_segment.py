@@ -3,7 +3,7 @@ import tandem.visual.deploy as deploy_mod
 from tandem.phases.signals import Signals
 from tandem.phases.detect import Event, Segment
 from tandem.phases.segment import (Segmentation, segment_signals, _add_canopy,
-                                   _apply_probe, _deploy_span_ok)
+                                   _apply_probe, _deploy_span_ok, _visual_fallback)
 
 
 def _jump_with_exit_breakoff():
@@ -100,6 +100,27 @@ def test_apply_probe_visual_breakoff_fills_a_missing_gyro_breakoff(monkeypatch):
     assert next(e for e in out.events if e.type == "operator_breakoff").t_s == 88.5
     assert "VISUAL_BREAKOFF_DISAGREEMENT" not in out.degradations
     assert len(out.intervals()) == 3                         # раскрытие now closes
+
+
+def test_visual_fallback_builds_the_jump_when_telemetry_has_no_exit(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_span",
+                        lambda *a, **k: {"exit": 22.5, "drogue": 26.0, "deploy": 70.5,
+                                         "breakoff": 74.5})
+    out = Segmentation()                                  # telemetry found no exit
+    _visual_fallback(out, "dummy.mp4", 0.0, 85.0)
+    assert next(e for e in out.events if e.type == "exit").t_s == 22.5
+    assert next(e for e in out.events if e.type == "operator_breakoff").t_s == 74.5
+    assert out.drogue.t_s == 26.0 and out.canopy.start_s == 70.5
+    assert "VISUAL_FALLBACK" in out.degradations
+    assert len(out.intervals()) == 3
+
+
+def test_visual_fallback_adds_nothing_on_a_non_jump_clip(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_span",
+                        lambda *a, **k: {"exit": None, "drogue": None, "deploy": None})
+    out = Segmentation()
+    _visual_fallback(out, "dummy.mp4", 0.0, 60.0)
+    assert out.events == [] and out.degradations == [] and out.canopy is None
 
 
 def test_deploy_span_ok_bounds():

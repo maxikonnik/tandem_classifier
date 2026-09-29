@@ -40,6 +40,16 @@ FREEFALL_MIN_S = 15.0
 EXIT_DEPLOY_MIN_S = 18.0
 EXIT_DEPLOY_MAX_S = 60.0
 
+# Visual fallback when telemetry gives no exit. Anchored on an exposure exit, the
+# probe window runs FALLBACK_PRE_S before it (the probe's cabin context) to
+# FALLBACK_AFTER_S after (exit->break-off is ~55 s; generous for late telemetry).
+# Without any telemetry the whole clip is searched, but only for clips that could hold
+# a jump and are not so long that every ground clip in an archive burns minutes of CPU.
+FALLBACK_PRE_S = 21.0
+FALLBACK_AFTER_S = 150.0
+FALLBACK_MIN_S = 40.0
+FALLBACK_MAX_S = 600.0
+
 # For accel-only cameras (DJI, Insta360) with no exposure/GPS exit-corroborator, the
 # exit detector can fire on a ground or handling jerk. A real jump enters free-fall,
 # where the accelerometer drops toward weightlessness; a ground clip never does. So
@@ -223,20 +233,58 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True,
                  probe: bool = False) -> Segmentation | None:
     sig = build_signals_from_file(path, fs=fs)
     if sig is None:
-        return None
+        # No telemetry at all (typically a re-exported/edited file with GPMF stripped):
+        # with the probe on, look for a jump visually over the whole clip.
+        if not probe:
+            return None
+        from tandem.recon.dji import probe_duration
+        dur = probe_duration(path)
+        if not (FALLBACK_MIN_S <= dur <= FALLBACK_MAX_S):
+            return None
+        out = Segmentation(source="none")
+        _visual_fallback(out, path, 0.0, dur)
+        return out if any(e.type == "exit" for e in out.events) else None
     out = segment_signals(sig)
     if visual:
         _add_canopy(out, path)
         _add_drogue(out, path)
     if probe:
-        _apply_probe(out, path)
+        if any(e.type == "exit" for e in out.events):
+            _apply_probe(out, path)
+        else:
+            # The accel exit can miss a short, shallow post-exit dip (at terminal speed
+            # a GoPro reads ~1 g again within seconds); the exposure jump still marks
+            # leaving the cabin, so anchor a visual search there.
+            exp = next((e for e in out.events if e.type == "exit_exposure"), None)
+            if exp is not None:
+                _visual_fallback(out, path, max(0.0, exp.t_s - FALLBACK_PRE_S),
+                                 exp.t_s + FALLBACK_AFTER_S)
     return out
 
 
+def _visual_fallback(out: "Segmentation", path: str, lo: float, hi: float) -> None:
+    """Find the jump purely visually in [lo, hi] when telemetry gave no exit: the
+    5-class probe's HSMM decode places exit (5 fps refined), drogue, deploy and
+    break-off, or finds no transition at all on a non-jump clip (then nothing is
+    added). Flags VISUAL_FALLBACK so the annotator knows no telemetry backed it."""
+    try:
+        from tandem.visual.probe import predict_span
+        pred = predict_span(path, lo, hi)
+    except Exception:
+        return
+    if not pred or pred.get("exit") is None:
+        return
+    exit_e = Event(type="exit", t_s=pred["exit"], source="visual-probe", confidence=0.8)
+    out.events.append(exit_e)
+    out.degradations.append("VISUAL_FALLBACK")
+    out.tracking_window = (exit_e.t_s, hi)
+    _merge_probe(out, dict(pred, exit=None), exit_e, None, hi)
+
+
 def _apply_probe(out: "Segmentation", path: str) -> None:
-    """Override the drogue and canopy (deploy) boundaries with the frozen-backbone
-    probe — deploy 88 % / drogue 90 % vs the heuristics' 59 % / 16 % (leave-one-
-    session-out, 143 jumps). Its window is [exit, window_end]; window_end is the
+    """Refine the boundaries with the frozen-backbone probe (5 classes, HSMM decode;
+    leave-one-session-out on 153 jumps, within 2 s: exit 99 %, drogue 96 %, deploy
+    98 %, break-off 93 %). Its window is [exit, window_end]; window_end is the
     break-off when detected, else the free-fall end (tracking_window). The latter
     keeps the probe working on DJI accel-only telemetry, which has no gyro turn to
     give a break-off. Best-effort: if torch/transformers or the probe weights are
@@ -258,6 +306,14 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
         return
     if not pred:
         return
+    _merge_probe(out, pred, exit_e, breakoff, window_end)
+
+
+def _merge_probe(out: "Segmentation", pred: dict, exit_e, breakoff, window_end: float) -> None:
+    """Fold a probe prediction into the segmentation — visual exit and break-off
+    events, drogue and canopy — each behind the physical-plausibility guards.
+    ``exit_e`` is the exit the guards measure from; ``breakoff``/``window_end`` bound
+    раскрытие until a visual break-off replaces them."""
     # A pre-exit-aware probe also locates exit visually: record it as an independent
     # corroborator (like exit_exposure) and flag a wide gap to the telemetry exit.
     vis_exit = pred.get("exit")
