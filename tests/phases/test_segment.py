@@ -133,6 +133,41 @@ def test_post_exit_dip_gates_the_exposure_fallback():
     assert _post_exit_dip_g(sig, 20.0) < FALLBACK_DIP_G          # real exit: search
 
 
+def test_apply_probe_vetoes_a_telemetry_jump_the_probe_sees_as_cabin_only(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"exit": None, "drogue": None, "deploy": None,
+                                         "jump_seen": False})
+    out = _jump_with_exit_breakoff()
+    out.drogue = Event("drogue", 42.0, "visual", 0.5)
+    _apply_probe(out, "dummy.mp4")
+    assert not any(e.type in ("exit", "operator_breakoff") for e in out.events)
+    assert out.drogue is None and out.canopy is None
+    assert "VISUAL_NO_JUMP" in out.degradations
+
+
+def test_apply_probe_keeps_the_jump_when_the_span_opened_after_exit(monkeypatch):
+    # exit unseen because the window started mid-jump: jump_seen, so no veto.
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"exit": None, "drogue": None, "deploy": 84.0,
+                                         "jump_seen": True})
+    out = _jump_with_exit_breakoff()
+    _apply_probe(out, "dummy.mp4")
+    assert next(e for e in out.events if e.type == "exit").t_s == 38.0
+    assert "VISUAL_NO_JUMP" not in out.degradations
+
+
+def test_apply_probe_drops_an_unseen_exit_on_accel_only_cameras(monkeypatch):
+    monkeypatch.setattr(probe_mod, "predict_boundaries",
+                        lambda *a, **k: {"exit": None, "drogue": None, "deploy": 84.0,
+                                         "jump_seen": True})
+    out = _jump_with_exit_breakoff()
+    out.source = "dji"
+    _apply_probe(out, "dummy.mp4")
+    assert not any(e.type == "exit" for e in out.events)        # no untrusted exit
+    assert next(e for e in out.events if e.type == "exit_telemetry").t_s == 38.0
+    assert out.canopy is not None and "EXIT_NOT_SEEN" in out.degradations
+
+
 def test_deploy_span_ok_bounds():
     # exit at 40: deploy plausible only within [40+18, 40+60] = [58, 100].
     assert _deploy_span_ok(40.0, 90.0) is True

@@ -246,12 +246,14 @@ def predict_span(path: str, lo: float, hi: float):
     if cfg.get("durations"):
         priors = [_duration_prior(cfg["durations"].get(p)) for p in phases]
         starts = _decode(_log_softmax(z / HSMM_TEMP), priors, dt=1.0)
+        jump_seen = starts[1] < len(ts)          # some frame decoded past the first phase
 
         def at(name):
             s = starts[phases.index(name)]
             return float(ts[s]) if 0 < s < len(ts) else None   # outside the span = unseen
     else:
         sm = _smooth(z.argmax(1), len(phases))
+        jump_seen = bool((sm >= 1).any())
 
         def at(name):
             return _boundary(sm, ts, phases.index(name))
@@ -261,7 +263,10 @@ def predict_span(path: str, lo: float, hi: float):
         if exit_t is not None:
             exit_t = _refine(path, exit_t, phases.index("отделение"), cfg, model,
                              lag_s=EXIT_VISUAL_LAG_S)
-    out = {"exit": exit_t, "drogue": at("свободное падение"), "deploy": at("раскрытие")}
+    # jump_seen tells "only cabin in the span" (not a jump) apart from "the span opened
+    # after the exit" (exit unseen, but the jump is there) — both give exit=None.
+    out = {"exit": exit_t, "drogue": at("свободное падение"), "deploy": at("раскрытие"),
+           "jump_seen": jump_seen if "до отделения" in phases else None}
     if cfg.get("visual_breakoff") and "после" in phases:
         out["breakoff"] = at("после")
     return out

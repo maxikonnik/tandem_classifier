@@ -321,6 +321,25 @@ def _apply_probe(out: "Segmentation", path: str) -> None:
         return
     if not pred:
         return
+    if pred.get("jump_seen") is False:
+        # The probe saw only the cabin around the telemetry exit — no frame of the jump.
+        # Telemetry fired on something else (e.g. an in-cabin dip on a worn DJI in the
+        # aircraft or at the interview), so this is not a jump: drop the draft.
+        out.events = [e for e in out.events if e.type not in ("exit", "operator_breakoff")]
+        out.drogue = None
+        out.canopy = None
+        out.tracking_window = None
+        out.degradations.append("VISUAL_NO_JUMP")
+        return
+    if pred.get("exit") is None and pred.get("jump_seen") is not None and out.source != "gpmf":
+        # An accel-only camera's exit is trusted only when the probe sees it: the DJI
+        # accel exit fires in the cabin / 7-10 s early. Keep it for reference, emit no
+        # exit boundary; the visual boundaries the clip does show still stand (it may
+        # be one piece of a jump split across several DJI files).
+        out.events = [e for e in out.events if e is not exit_e]
+        out.events.append(Event(type="exit_telemetry", t_s=exit_e.t_s,
+                                source=exit_e.source, confidence=exit_e.confidence))
+        out.degradations.append("EXIT_NOT_SEEN")
     _merge_probe(out, pred, exit_e, breakoff, window_end)
 
 
