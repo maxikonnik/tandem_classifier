@@ -31,17 +31,16 @@ def test_apply_probe_rejects_collapsed_freefall(monkeypatch):
     assert "PROBE_FREEFALL_IMPLAUSIBLE" in out.degradations
 
 
-def test_apply_probe_records_visual_exit_and_flags_disagreement(monkeypatch):
+def test_apply_probe_visual_exit_is_primary_and_disagreement_flagged(monkeypatch):
     # telemetry exit 38 s; the probe sees the cabin end at 50 s -> 12 s apart.
     monkeypatch.setattr(probe_mod, "predict_boundaries",
                         lambda *a, **k: {"exit": 50.0, "drogue": 55.0, "deploy": 90.0})
-    out = _jump_with_exit_breakoff()
+    out = _jump_with_exit_breakoff()                   # GoPro (source gpmf)
     _apply_probe(out, "dummy.mp4")
-    vis = [e for e in out.events if e.type == "exit_visual"]
-    assert len(vis) == 1 and vis[0].t_s == 50.0
     assert "VISUAL_EXIT_DISAGREEMENT" in out.degradations
-    # the telemetry exit stays the exit boundary
-    assert next(e for e in out.events if e.type == "exit").t_s == 38.0
+    # the visual exit is the exit boundary; telemetry is kept only for reference
+    assert next(e for e in out.events if e.type == "exit").t_s == 50.0
+    assert next(e for e in out.events if e.type == "exit_telemetry").t_s == 38.0
 
 
 def test_apply_probe_visual_exit_agreeing_is_not_flagged(monkeypatch):
@@ -121,6 +120,17 @@ def test_visual_fallback_adds_nothing_on_a_non_jump_clip(monkeypatch):
     out = Segmentation()
     _visual_fallback(out, "dummy.mp4", 0.0, 60.0)
     assert out.events == [] and out.degradations == [] and out.canopy is None
+
+
+def test_post_exit_dip_gates_the_exposure_fallback():
+    from tandem.phases.segment import _post_exit_dip_g, FALLBACK_DIP_G
+    sig = Signals(fs=10.0)
+    sig.t_s = [i / 10 for i in range(600)]
+    sig.accel_min = [9.8] * 600                     # a held camera: ~1 g throughout
+    assert _post_exit_dip_g(sig, 20.0) > FALLBACK_DIP_G          # interview: no search
+    for i in range(220, 240):
+        sig.accel_min[i] = 1.2                      # 0.12 g just after the exit
+    assert _post_exit_dip_g(sig, 20.0) < FALLBACK_DIP_G          # real exit: search
 
 
 def test_deploy_span_ok_bounds():

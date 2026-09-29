@@ -17,7 +17,7 @@ from tandem.phases.api import detect_phases
 from tandem.phases.detect import Event, Segment
 from tandem.phases.exposure import detect_exit_exposure
 from tandem.phases.motion import detect_breakoff, detect_orbit, freefall_std_ok
-from tandem.phases.signals import build_signals_from_file
+from tandem.phases.signals import G, build_signals_from_file
 
 # Accel and exposure exits should agree within this; a wider gap is flagged for review.
 EXIT_AGREE_S = 3.0
@@ -49,6 +49,13 @@ FALLBACK_PRE_S = 21.0
 FALLBACK_AFTER_S = 150.0
 FALLBACK_MIN_S = 40.0
 FALLBACK_MAX_S = 600.0
+# The exposure exit alone is not selective: going from indoors to daylight looks the
+# same (it fires on ~37 % of non-jump clips — interviews, landings). A real exit is
+# followed within seconds by a near-weightless dip even when the accel exit missed it
+# (0.06-0.18 g on the missed jumps); only 9 % of non-jump exposure clips dip below
+# 0.3 g. So the visual search is gated on that dip, sparing most of an archive.
+FALLBACK_DIP_G = 0.3
+FALLBACK_DIP_WINDOW_S = (-3.0, 15.0)
 
 # For accel-only cameras (DJI, Insta360) with no exposure/GPS exit-corroborator, the
 # exit detector can fire on a ground or handling jerk. A real jump enters free-fall,
@@ -256,10 +263,18 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True,
             # a GoPro reads ~1 g again within seconds); the exposure jump still marks
             # leaving the cabin, so anchor a visual search there.
             exp = next((e for e in out.events if e.type == "exit_exposure"), None)
-            if exp is not None:
+            if exp is not None and _post_exit_dip_g(sig, exp.t_s) < FALLBACK_DIP_G:
                 _visual_fallback(out, path, max(0.0, exp.t_s - FALLBACK_PRE_S),
                                  exp.t_s + FALLBACK_AFTER_S)
     return out
+
+
+def _post_exit_dip_g(sig, t: float) -> float:
+    """Deepest specific force (in g) around a candidate exit — the weightless dip a
+    real exit produces. Large (no dip) when the window holds no samples."""
+    lo, hi = t + FALLBACK_DIP_WINDOW_S[0], t + FALLBACK_DIP_WINDOW_S[1]
+    vals = [a for ts, a in zip(sig.t_s, sig.accel_min) if lo <= ts <= hi]
+    return min(vals) / G if vals else float("inf")
 
 
 def _visual_fallback(out: "Segmentation", path: str, lo: float, hi: float) -> None:
@@ -314,26 +329,22 @@ def _merge_probe(out: "Segmentation", pred: dict, exit_e, breakoff, window_end: 
     events, drogue and canopy — each behind the physical-plausibility guards.
     ``exit_e`` is the exit the guards measure from; ``breakoff``/``window_end`` bound
     раскрытие until a visual break-off replaces them."""
-    # A pre-exit-aware probe also locates exit visually: record it as an independent
-    # corroborator (like exit_exposure) and flag a wide gap to the telemetry exit.
+    # The visual exit is the exit on every camera: against labels a human placed
+    # themselves it lands within 1 s on 100 % of GoPro jumps (telemetry: 74 %, median
+    # 0.20 vs 0.62 s), and on DJI the accel exit fires on in-cabin movement 7-10 s
+    # early. Telemetry only located the window; it is kept as exit_telemetry, and a gap
+    # over EXIT_AGREE_S is flagged for review.
     vis_exit = pred.get("exit")
     if vis_exit is not None:
-        out.events.append(Event(type="exit_visual", t_s=vis_exit,
-                                source="visual-probe", confidence=0.85))
         if abs(vis_exit - exit_e.t_s) > EXIT_AGREE_S:
             out.degradations.append("VISUAL_EXIT_DISAGREEMENT")
-        if out.source != "gpmf":
-            # An accel-only camera (DJI, Insta360) has no exposure corroborator and its
-            # accel exit fires on in-cabin movement at the door (seen 7-17 s early on
-            # DJI jumps, giving implausible 12-22 s exit->drogue gaps). The visual exit
-            # is the primary one there; the telemetry exit is kept for reference.
-            out.events = [e for e in out.events if e is not exit_e]
-            out.events.append(Event(type="exit_telemetry", t_s=exit_e.t_s,
-                                    source=exit_e.source, confidence=exit_e.confidence))
-            exit_e = Event(type="exit", t_s=vis_exit, source="visual-probe", confidence=0.85)
-            out.events.append(exit_e)
-            if out.tracking_window is not None:
-                out.tracking_window = (vis_exit, out.tracking_window[1])
+        out.events = [e for e in out.events if e is not exit_e]
+        out.events.append(Event(type="exit_telemetry", t_s=exit_e.t_s,
+                                source=exit_e.source, confidence=exit_e.confidence))
+        exit_e = Event(type="exit", t_s=vis_exit, source="visual-probe", confidence=0.9)
+        out.events.append(exit_e)
+        if out.tracking_window is not None:
+            out.tracking_window = (vis_exit, out.tracking_window[1])
     # Break-off (отворот) is the pair leaving the operator's frame — a visual event.
     # A probe trained on post-break-off frames finds it directly; it then replaces the
     # gyroscope turn (kept as breakoff_telemetry) and also fills jumps where the gyro
