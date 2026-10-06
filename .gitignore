@@ -49,3 +49,5 @@ features/
 
 # ML-разведка: эмбеддинги и скрипты (производное, durable кэш)
 _ml_scratch/
+_dji/
+Samples
