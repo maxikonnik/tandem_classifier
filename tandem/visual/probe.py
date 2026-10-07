@@ -170,8 +170,9 @@ def _decode(logp, priors, dt):
     return starts
 
 
-def _classify_span(path, lo, hi, fps, cfg, model):
-    """``(ts, logits per frame)`` for frames sampled at ``fps`` in [lo, hi], or None."""
+def _embed_span(path, lo, hi, fps, model):
+    """``(ts, backbone embedding per frame)`` for frames sampled at ``fps`` in [lo, hi],
+    or None. Shared by the phase probe and the shot-scale head."""
     td = tempfile.mkdtemp()
     try:
         subprocess.run(["ffmpeg", "-y", "-ss", f"{lo:.2f}", "-to", f"{hi:.2f}", "-i", path,
@@ -188,7 +189,15 @@ def _classify_span(path, lo, hi, fps, cfg, model):
         for fp in glob.glob(os.path.join(td, "f_*.jpg")):
             os.remove(fp)
         os.rmdir(td)
-    ts = np.array([lo + i / fps for i in range(len(emb))], np.float32)
+    return np.array([lo + i / fps for i in range(len(emb))], np.float32), emb
+
+
+def _classify_span(path, lo, hi, fps, cfg, model):
+    """``(ts, logits per frame)`` for frames sampled at ``fps`` in [lo, hi], or None."""
+    got = _embed_span(path, lo, hi, fps, model)
+    if got is None:
+        return None
+    ts, emb = got
     mu = np.array(cfg["mu"], np.float32); sd = np.array(cfg["sd"], np.float32)
     W = np.array(cfg["W"], np.float32); b = np.array(cfg["b"], np.float32)
     return ts, ((emb - mu) / sd) @ W.T + b
