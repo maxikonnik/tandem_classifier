@@ -26,8 +26,11 @@ heuristic detectors.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
+import subprocess
+import tempfile
 
 import numpy as np
 
@@ -59,64 +62,6 @@ EXIT_VISUAL_LAG_S = 0.40
 
 _cfg = None
 _model = None
-_GPU_BATCH = 64
-
-
-def device():
-    """'cuda' when torch sees a GPU, else 'cpu'."""
-    import torch
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-_TS_DIR = os.path.join(os.path.dirname(__file__), "models")
-
-
-class _Pooled:
-    """Callable with the transformers interface used here (``model(pixel_values=x)
-    .pooler_output``) around a TorchScript backbone."""
-
-    def __init__(self, ts):
-        self.ts = ts
-
-    def __call__(self, pixel_values):
-        from types import SimpleNamespace
-        return SimpleNamespace(pooler_output=self.ts(pixel_values))
-
-    def parameters(self):
-        return self.ts.parameters()
-
-
-def _torchscript_backbone(name: str, dev: str):
-    """The backbone as TorchScript (pooler output only) for ``dev`` — fp16 on CUDA, fp32
-    on the CPU — built once from transformers and cached in tandem/visual/models.
-    ``import transformers`` alone costs ~25 s on this machine; loading the cached
-    TorchScript ~1 s. Traced in its final dtype: the model casts its input to the weight
-    dtype, and tracing freezes that cast."""
-    import torch
-    half = dev == "cuda"
-    path = os.path.join(_TS_DIR, f"{name.replace('/', '__')}__{dev}_{'fp16' if half else 'fp32'}.ts")
-    if not os.path.exists(path):
-        from transformers import AutoModel  # lazy, optional dep; only for the first build
-        try:
-            m = AutoModel.from_pretrained(name, local_files_only=True)
-        except OSError:
-            m = AutoModel.from_pretrained(name)
-        m = (m.half() if half else m).to(dev).eval()
-
-        class _Wrap(torch.nn.Module):
-            def __init__(self, inner):
-                super().__init__()
-                self.inner = inner
-
-            def forward(self, pixel_values):
-                return self.inner(pixel_values=pixel_values).pooler_output
-
-        x = torch.zeros(2, 3, 224, 224, device=dev, dtype=torch.float16 if half else torch.float32)
-        with torch.no_grad():
-            ts = torch.jit.trace(_Wrap(m), x, check_trace=False, strict=False)
-        os.makedirs(_TS_DIR, exist_ok=True)
-        ts.save(path)
-    return torch.jit.load(path, map_location=dev).eval()
 
 
 def _load():
@@ -125,39 +70,23 @@ def _load():
         with open(_PROBE_JSON, encoding="utf-8") as f:
             _cfg = json.load(f)
     if _model is None:
-        _model = _Pooled(_torchscript_backbone(_cfg["backbone"], device()))
+        from transformers import AutoModel  # lazy, optional dep
+        _model = AutoModel.from_pretrained(_cfg["backbone"]).eval()
     return _cfg, _model
 
 
-def embed_arrays(frames, model) -> np.ndarray:
-    """DINOv2 pooler embeddings of uint8 RGB frames [N, H, W, 3] (resized to 224 here if
-    needed), on the model's device — fp16 on the GPU — returned as float32 [N, 384]."""
-    import torch
-    import torch.nn.functional as F
-    frames = np.asarray(frames)
-    if len(frames) == 0:
-        return np.zeros((0, 384), np.float32)
-    dev = next(model.parameters()).device
-    dtype = next(model.parameters()).dtype
-    mean = torch.tensor(_IMAGENET_MEAN, device=dev).view(1, 3, 1, 1)
-    std = torch.tensor(_IMAGENET_STD, device=dev).view(1, 3, 1, 1)
-    bs = _GPU_BATCH if dev.type == "cuda" else _BATCH
-    out = []
-    with torch.no_grad():
-        for s in range(0, len(frames), bs):
-            x = torch.from_numpy(np.ascontiguousarray(frames[s:s + bs])).to(dev).permute(0, 3, 1, 2).float() / 255.0
-            if x.shape[-2:] != (224, 224):
-                x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False, antialias=True)
-            x = ((x - mean) / std).to(dtype)
-            out.append(model(pixel_values=x).pooler_output.float().cpu().numpy())
-    return np.concatenate(out).astype(np.float32)
-
-
 def _embed(frame_paths, model):
-    """Embeddings of image files (kept for callers that have files, not arrays)."""
+    import torch
     from PIL import Image
-    return embed_arrays(np.stack([np.asarray(Image.open(fp).convert("RGB").resize((224, 224)))
-                                  for fp in frame_paths]), model)
+    out = []
+    for s in range(0, len(frame_paths), _BATCH):
+        batch = []
+        for fp in frame_paths[s:s + _BATCH]:
+            a = np.asarray(Image.open(fp).convert("RGB").resize((224, 224)), np.float32) / 255.0
+            batch.append(((a - _IMAGENET_MEAN) / _IMAGENET_STD).transpose(2, 0, 1))
+        with torch.no_grad():
+            out.append(model(pixel_values=torch.tensor(np.stack(batch))).pooler_output.numpy())
+    return np.concatenate(out).astype(np.float32)
 
 
 def _first_ge(cls, ts, k):
@@ -241,33 +170,26 @@ def _decode(logp, priors, dt):
     return starts
 
 
-# 1 fps passes read only the keyframes (one a second in this archive) — 1/50 of the
-# decoding, 5x faster on 4K. Their timestamps are exact, while the frames the probe was
-# trained on (ffmpeg fps filter) show content ~0.5 s after their nominal time; the phase
-# probe therefore reads a keyframe as the slot KEYFRAME_SHIFT_S earlier, which restores
-# the trained timing. Held-out check (67 jumps of E:/V/Sep and E:/V/10, boundaries the
-# annotator placed himself, share within 1 s / 2 s, old CPU -> keyframes):
-#   drogue 74/89 -> 74/100 %, deploy 82/100 -> 85/95 %, break-off 73/95 -> 77/95 %.
-# Without the shift deploy falls to 32 % within 1 s. KEYFRAMES_1FPS=False restores the
-# old sampling (decodes the whole span).
-KEYFRAMES_1FPS = True
-KEYFRAME_SHIFT_S = -0.5
-
-
 def _embed_span(path, lo, hi, fps, model):
     """``(ts, backbone embedding per frame)`` for frames sampled at ``fps`` in [lo, hi],
-    or None. Shared by the phase probe and the shot-scale head. Decoding on the GPU when
-    available (tandem.video_io)."""
-    from tandem.video_io import read_frames
+    or None. Shared by the phase probe and the shot-scale head."""
+    td = tempfile.mkdtemp()
     try:
-        ts, frames = read_frames(path, lo, hi, 224, 224, fps=fps,
-                                 keyframes=KEYFRAMES_1FPS and fps == 1)
-        if len(frames) == 0:
+        subprocess.run(["ffmpeg", "-y", "-ss", f"{lo:.2f}", "-to", f"{hi:.2f}", "-i", path,
+                        "-vf", f"fps={fps},scale=224:224", os.path.join(td, "f_%04d.jpg")],
+                       check=False, capture_output=True)
+        frames = sorted(glob.glob(os.path.join(td, "f_*.jpg")))
+        if not frames:
             return None
-        emb = embed_arrays(frames, model)
-    except Exception:
-        return None
-    return np.asarray(ts, np.float32), emb
+        try:
+            emb = _embed(frames, model)
+        except Exception:
+            return None
+    finally:
+        for fp in glob.glob(os.path.join(td, "f_*.jpg")):
+            os.remove(fp)
+        os.rmdir(td)
+    return np.array([lo + i / fps for i in range(len(emb))], np.float32), emb
 
 
 def _classify_span(path, lo, hi, fps, cfg, model):
@@ -276,8 +198,6 @@ def _classify_span(path, lo, hi, fps, cfg, model):
     if got is None:
         return None
     ts, emb = got
-    if KEYFRAMES_1FPS and fps == 1:
-        ts = ts + KEYFRAME_SHIFT_S          # keyframe time -> the trained fps-filter slot
     mu = np.array(cfg["mu"], np.float32); sd = np.array(cfg["sd"], np.float32)
     W = np.array(cfg["W"], np.float32); b = np.array(cfg["b"], np.float32)
     return ts, ((emb - mu) / sd) @ W.T + b

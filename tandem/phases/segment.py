@@ -252,7 +252,7 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True,
         _visual_fallback(out, path, 0.0, dur)
         return out if any(e.type == "exit" for e in out.events) else None
     out = segment_signals(sig)
-    if visual and not probe:
+    if visual:
         _add_canopy(out, path)
         _add_drogue(out, path)
     if probe:
@@ -266,13 +266,6 @@ def segment_file(path: str, fs: float = 10.0, visual: bool = True,
             if exp is not None and _post_exit_dip_g(sig, exp.t_s) < FALLBACK_DIP_G:
                 _visual_fallback(out, path, max(0.0, exp.t_s - FALLBACK_PRE_S),
                                  exp.t_s + FALLBACK_AFTER_S)
-        # The CPU heuristics decode the whole jump and the probe overrides them; run one
-        # only for a boundary the probe left empty (no weights, unreadable frames).
-        if visual and any(e.type == "exit" for e in out.events):
-            if out.canopy is None:
-                _add_canopy(out, path)
-            if out.drogue is None:
-                _add_drogue(out, path)
     return out
 
 
